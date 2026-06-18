@@ -8,8 +8,7 @@ __pycache__/
 # data (CIFAR-10 is downloaded, not committed)
 data/
 
-# scratch / cluster logs - local only, not part of the tutorial
+# local scratch and cluster logs
 .local/
 
-# the trained checkpoint lut_cifar10.pt IS committed (it's a deliverable),
-# so it is intentionally NOT ignored here.
+# the trained checkpoint in results/ is committed on purpose, so it stays tracked.

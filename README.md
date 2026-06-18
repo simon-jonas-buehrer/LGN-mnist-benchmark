@@ -3,7 +3,7 @@
 
 *Hi Branton this Tutorial is for you!*
 
-In bad fashion I made this tutorial with Claude, but i personall reviewed all of it and its fine.
+In bad fashion I made this tutorial with Claude, but i personaly reviewed *all* of it and its fine.
 
 A tiny, self-contained introduction to Look-Up Table (LUT) networks: neural networks whose
 neurons are learnable boolean logic gates instead of weighted sums. Everything is pure
