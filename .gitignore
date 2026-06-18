@@ -1,0 +1,15 @@
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# data (CIFAR-10 is downloaded, not committed)
+data/
+
+# scratch / cluster logs - local only, not part of the tutorial
+.local/
+
+# the trained checkpoint lut_cifar10.pt IS committed (it's a deliverable),
+# so it is intentionally NOT ignored here.

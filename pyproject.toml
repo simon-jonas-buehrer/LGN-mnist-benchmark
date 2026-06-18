@@ -1,0 +1,16 @@
+[project]
+name = "lut-tutorial"
+version = "0.1.0"
+description = "A tiny, dependency-light LUT (look-up table) network in pure PyTorch - trains on CIFAR-10 and overfits."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Plain wheels from PyPI: uv picks the right build for your platform -
+    # CPU on a Mac/laptop, CUDA on a Linux GPU box. Nothing cluster-specific.
+    "torch>=2.2",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+]
+
+[tool.uv]
+package = false
