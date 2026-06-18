@@ -25,8 +25,7 @@ A 2-input truth table has `2^2 = 4` entries `f(0,0), f(0,1), f(1,0), f(1,1)`. Fo
 are enough to express all 16 boolean functions of two inputs (AND, OR, XOR, NAND, "pass A",
 "constant 0", and so on), so each neuron learns which logic gate it should be. Stack a few
 layers and you get a deep combinational logic circuit. It trains by SGD and maps directly onto
-the LUTs inside an FPGA or ASIC at inference time. This is the idea behind
-[DiffLogic](https://arxiv.org/abs/2210.08277) and related work.
+the LUTs inside an FPGA or ASIC at inference time.
 
 The full pipeline, where every signal between layers is a single bit:
 
