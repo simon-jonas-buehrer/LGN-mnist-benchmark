@@ -1,23 +1,20 @@
-"""Train the tiny LUT network on CIFAR-10 and watch it OVERFIT.
+"""Train the LUT network on CIFAR-10.
 
-The whole point of this script is pedagogical: there is NO regularization and NO data
-augmentation. We train the full CIFAR-10 training set (90/10 train/val split) for a long
-time, so the model keeps fitting the training set ever better while validation/test
-accuracy plateaus. The widening gap between the curves IS overfitting.
+There is no regularization and no data augmentation, so with enough capacity the model fits
+the training set far better than the held-out sets and the train/val gap grows.
 
-Everything is written to a results folder (default ``results/``):
-    results/train.log      full console log
+Outputs go to a results folder (default results/):
+    results/train.log      console log
     results/metrics.csv    per-epoch train/val/test loss, accuracy, perplexity
-    results/curves.png     plots of loss, accuracy and perplexity over epochs
-    results/lut_cifar10.pt trained weights (the checkpoint)
+    results/curves.png     loss, accuracy and perplexity over epochs
+    results/lut_cifar10.pt trained weights
 
-    uv run python train.py                       # full 50k set (default), 90/10 train/val split
-    uv run python train.py --train-size 2000     # memorize a tiny subset instead
+    uv run python train.py                       full 50k set, 90/10 train/val split
+    uv run python train.py --train-size 2000     small subset
     uv run python train.py --epochs 100 --device cuda
 
-CIFAR-10 is read directly from the original ``cifar-10-batches-py`` pickle files (no
-torchvision dependency). Point ``--data-dir`` at a folder that contains ``data_batch_*``
-and ``test_batch``, or pass ``--download`` to fetch+extract it there.
+CIFAR-10 is read from the original cifar-10-batches-py pickle files (no torchvision). Point
+--data-dir at a folder with data_batch_* and test_batch, or pass --download to fetch it.
 """
 
 from __future__ import annotations
@@ -42,7 +39,7 @@ VAL_FRACTION = 0.1  # 90/10 train/val split of the (sub)set used for training
 
 
 # --------------------------------------------------------------------------------------
-# Data: a minimal, dependency-free CIFAR-10 loader
+# Data: a small CIFAR-10 loader
 # --------------------------------------------------------------------------------------
 def _maybe_download(data_dir: Path) -> None:
     if (data_dir / "test_batch").exists():
@@ -53,14 +50,14 @@ def _maybe_download(data_dir: Path) -> None:
     urllib.request.urlretrieve(CIFAR_URL, tgz)
     with tarfile.open(tgz) as tar:
         tar.extractall(data_dir)
-    nested = data_dir / "cifar-10-batches-py"  # archive extracts to a nested dir - flatten it
+    nested = data_dir / "cifar-10-batches-py"  # archive extracts to a nested dir, flatten it
     if nested.exists():
         for f in nested.iterdir():
             f.rename(data_dir / f.name)
 
 
 def load_cifar10(data_dir: Path, download: bool) -> tuple[torch.Tensor, ...]:
-    """Return ``(train_x, train_y, test_x, test_y)`` with images in ``[0,1]``, shape (N,3,32,32)."""
+    """Return (train_x, train_y, test_x, test_y) with images in [0,1], shape (N,3,32,32)."""
     if download:
         _maybe_download(data_dir)
 
@@ -95,7 +92,7 @@ def evaluate(model, x, y, device: str, batch: int = 1000) -> dict[str, float]:
 
 
 # --------------------------------------------------------------------------------------
-# Plot the learning curves
+# Learning curves
 # --------------------------------------------------------------------------------------
 def plot_curves(history: list[dict], out_path: Path) -> None:
     import matplotlib
@@ -115,7 +112,7 @@ def plot_curves(history: list[dict], out_path: Path) -> None:
         ax.set_xlabel("epoch")
         ax.grid(alpha=0.3)
         ax.legend()
-    fig.suptitle("LUT network on CIFAR-10 - train/val/test (overfitting demo)")
+    fig.suptitle("LUT network on CIFAR-10, train/val/test")
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
@@ -156,8 +153,8 @@ def main() -> None:
 
     train_x, train_y, test_x, test_y = load_cifar10(args.data_dir, args.download)
 
-    # Select the working set (full 50k by default, or a subset), then split it 90/10
-    # into train/val. Test is the separate, untouched CIFAR-10 test set.
+    # Select the working set (full 50k by default, or a subset), then split it 90/10 into
+    # train/val. Test is the separate, untouched CIFAR-10 test set.
     work_x, work_y = train_x, train_y
     if args.train_size > 0:
         work_x, work_y = work_x[: args.train_size], work_y[: args.train_size]
@@ -172,7 +169,7 @@ def main() -> None:
     log(model)
     log(f"learnable LUT latents: {sum(q.numel() for q in model.parameters()):,}")
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)  # no weight decay -> no regularization
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr)  # no weight decay
 
     header = ("epoch | tr_loss | tr_acc | tr_ppl | va_loss | va_acc | va_ppl | "
               "te_loss | te_acc | te_ppl | gap | time")
@@ -204,7 +201,7 @@ def main() -> None:
             f"{te['loss']:7.3f} | {te['acc']:6.2f} | {te['ppl']:6.2f} | "
             f"{tr['acc'] - te['acc']:4.1f} | {time.time() - t0:4.0f}s")
 
-    # --- write the metrics CSV, the plot, and the checkpoint ---
+    # Write the metrics CSV, the plot, and the checkpoint.
     with open(args.results_dir / "metrics.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(history[0].keys()))
         w.writeheader()
@@ -215,8 +212,6 @@ def main() -> None:
                 "train_size": len(pool_x), "history": history}, ckpt)
 
     log(f"\nwrote: {args.results_dir}/train.log, metrics.csv, curves.png, {ckpt.name}")
-    log("Notice the gap: train_acc climbs toward 100% while val/test_acc stall "
-        "-> the LUT net is overfitting, exactly as intended.")
     log_file.close()
 
 

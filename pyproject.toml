@@ -1,7 +1,7 @@
 [project]
 name = "lut-tutorial"
 version = "0.1.0"
-description = "A tiny, dependency-light LUT (look-up table) network in pure PyTorch - trains on CIFAR-10 and overfits."
+description = "A small LUT (look-up table) network in pure PyTorch that trains on CIFAR-10."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
