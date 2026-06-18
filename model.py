@@ -195,23 +195,32 @@ class GroupSum(nn.Module):
     """Split the final bit vector into ``k`` equal groups and sum each group (popcount).
 
     The last LUT layer has ``out_dim`` bits; we cut them into ``k`` classes of
-    ``out_dim // k`` bits and count the ones per class. ``tau`` just scales the logits so
-    the softmax/cross-entropy that follows is not over-confident (it has no effect at eval).
+    ``group_size = out_dim // k`` bits and count the ones per class.
+
+    Each group sum is a sum of ``group_size`` ~Bernoulli bits, so its standard deviation
+    grows like ``sqrt(group_size)``. We therefore divide by ``sqrt(group_size)`` (the
+    variance-based scaling, same idea as 1/sqrt(d) attention scaling and the
+    ``votes / sqrt(head_mult)`` readout in the binary-attention record): this keeps the
+    logit variance ~constant no matter how wide the last layer is, so the softmax that
+    follows is neither saturated nor washed out. Scaling is monotone, so it has no effect
+    on the argmax at eval. Pass an explicit ``tau`` to override the auto value.
     """
 
-    def __init__(self, k: int, tau: float = 1.0) -> None:
+    def __init__(self, k: int, tau: float | None = None) -> None:
         super().__init__()
         self.k = k
-        self.tau = tau
+        self.tau = tau  # None -> variance-based sqrt(group_size), computed per forward
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1] % self.k != 0:
             raise ValueError(f"last dim {x.shape[-1]} not divisible by k={self.k}")
-        groups = x.reshape(x.shape[0], self.k, x.shape[-1] // self.k)
-        return groups.sum(-1) / self.tau
+        group_size = x.shape[-1] // self.k
+        tau = self.tau if self.tau is not None else group_size**0.5
+        groups = x.reshape(x.shape[0], self.k, group_size)
+        return groups.sum(-1) / tau
 
     def extra_repr(self) -> str:
-        return f"k={self.k}, tau={self.tau}"
+        return f"k={self.k}, tau={self.tau if self.tau is not None else 'sqrt(group_size)'}"
 
 
 # ======================================================================================
@@ -228,7 +237,7 @@ class Config:
     image_size: int = 32
     num_bits: int = 2          # thermometer bits per channel
     layer_widths: tuple[int, ...] = (12000, 12000, 12000)  # one LUTLayer per entry
-    tau: float = 100.0         # head logit scale
+    tau: float | None = None   # head logit scale; None = variance-based sqrt(group_size)
     seed: int = 0
 
 

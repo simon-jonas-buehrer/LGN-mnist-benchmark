@@ -1,9 +1,9 @@
 """Train the tiny LUT network on CIFAR-10 and watch it OVERFIT.
 
 The whole point of this script is pedagogical: there is NO regularization and NO data
-augmentation. We train on a small subset of CIFAR-10 so that the model memorizes the
-training set (train accuracy shoots toward 100%) while validation/test accuracy plateaus
-far below. The widening gap between the curves IS overfitting.
+augmentation. We train the full CIFAR-10 training set (90/10 train/val split) for a long
+time, so the model keeps fitting the training set ever better while validation/test
+accuracy plateaus. The widening gap between the curves IS overfitting.
 
 Everything is written to a results folder (default ``results/``):
     results/train.log      full console log
@@ -11,9 +11,9 @@ Everything is written to a results folder (default ``results/``):
     results/curves.png     plots of loss, accuracy and perplexity over epochs
     results/lut_cifar10.pt trained weights (the checkpoint)
 
-    uv run python train.py                       # overfit a 5k subset (default)
-    uv run python train.py --train-size 0        # use the full training set instead
-    uv run python train.py --epochs 50 --device cuda
+    uv run python train.py                       # full 50k set (default), 90/10 train/val split
+    uv run python train.py --train-size 2000     # memorize a tiny subset instead
+    uv run python train.py --epochs 100 --device cuda
 
 CIFAR-10 is read directly from the original ``cifar-10-batches-py`` pickle files (no
 torchvision dependency). Point ``--data-dir`` at a folder that contains ``data_batch_*``
@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from model import Config, build_model
 
 CIFAR_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
-VAL_SIZE = 5000  # images held out of training for validation (always disjoint from train)
+VAL_FRACTION = 0.1  # 90/10 train/val split of the (sub)set used for training
 
 
 # --------------------------------------------------------------------------------------
@@ -128,9 +128,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path, default=Path("data/cifar-10-batches-py"))
     p.add_argument("--download", action="store_true", help="download CIFAR-10 if missing")
-    p.add_argument("--train-size", type=int, default=5000,
-                   help="number of training images (0 = full set minus the val split)")
-    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--train-size", type=int, default=0,
+                   help="size of the train+val pool (0 = full 50k set); split 90/10 into train/val")
+    p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--num-bits", type=int, default=2)
@@ -156,12 +156,15 @@ def main() -> None:
 
     train_x, train_y, test_x, test_y = load_cifar10(args.data_dir, args.download)
 
-    # Hold out a fixed validation split (disjoint from training).
-    val_x, val_y = train_x[-VAL_SIZE:], train_y[-VAL_SIZE:]
-    pool_x, pool_y = train_x[:-VAL_SIZE], train_y[:-VAL_SIZE]
+    # Select the working set (full 50k by default, or a subset), then split it 90/10
+    # into train/val. Test is the separate, untouched CIFAR-10 test set.
+    work_x, work_y = train_x, train_y
     if args.train_size > 0:
-        pool_x, pool_y = pool_x[: args.train_size], pool_y[: args.train_size]
-    log(f"train={len(pool_x)}  val={len(val_x)}  test={len(test_x)} images")
+        work_x, work_y = work_x[: args.train_size], work_y[: args.train_size]
+    n_val = max(1, round(len(work_x) * VAL_FRACTION))
+    val_x, val_y = work_x[-n_val:], work_y[-n_val:]
+    pool_x, pool_y = work_x[:-n_val], work_y[:-n_val]
+    log(f"train={len(pool_x)}  val={len(val_x)}  test={len(test_x)} images  (90/10 train/val split)")
 
     cfg = Config(num_bits=args.num_bits, layer_widths=tuple([args.width] * args.layers),
                  seed=args.seed)

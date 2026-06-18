@@ -1,14 +1,16 @@
 # LUT-Network Tutorial - boolean logic gates trained by gradient descent
 
 
-Hi Branton this Tutorial is for you! In bad fashion I made this tutorial with Claude and reviewed it.
+*Hi Branton this Tutorial is for you!*
+
+In bad fashion I made this tutorial with Claude, but i personall reviewed all of it and its fine.
 
 A **tiny, self-contained** introduction to *Look-Up Table (LUT) networks*: neural networks
 whose neurons are learnable boolean logic gates instead of weighted sums. Everything is
 pure PyTorch - **no custom CUDA kernels**, ~200 lines of model code you can read in one sitting.
 
 We train it on CIFAR-10 with **no regularization and no data augmentation**, so you can
-watch it *overfit*: training accuracy climbs toward 100% while test accuracy stalls.
+watch it *overfit*: training accuracy keeps pulling ahead while validation/test accuracy stalls.
 
 ## What is a LUT network?
 
@@ -75,36 +77,37 @@ uv sync          # creates .venv with torch + numpy + matplotlib (CPU or CUDA, p
 ## Run
 
 ```bash
-# Overfit a 5k CIFAR-10 subset (downloads the data on first run). CPU works; GPU is faster.
+# Train on the full CIFAR-10 training set (downloads the data on first run). GPU recommended;
+# on a laptop CPU drop to e.g. --train-size 2000 --width 4000 --layers 2 --epochs 30.
 uv run python train.py --download
-
-# Use a GPU explicitly / train on the full 50k set
-uv run python train.py --download --device cuda --train-size 0 --epochs 50
 
 # Reload the trained checkpoint and check test accuracy + peek at a learned gate
 uv run python load.py
 ```
 
-Data is split the conventional way: a fixed 5k validation set is held out of the 50k
-training images (a 90/10 train/val split) and the standard 10k CIFAR-10 test set is kept
-separate. The thermometer thresholds are fit on training data only, so there is no leakage.
+Data is split the conventional way: the training set is split **90/10 into train and
+validation**, and the standard 10k CIFAR-10 test set is kept separate. The thermometer
+thresholds are fit on training data only, so there is no leakage.
 
 Every epoch prints train/val/test **loss, accuracy and perplexity**, and the run writes
 `results/train.log`, `results/metrics.csv`, `results/curves.png` and the checkpoint
-`results/lut_cifar10.pt`. The committed `results/` come from a higher-capacity run that
-makes the gap dramatic (a 2k train subset is easy to memorize):
+`results/lut_cifar10.pt`. The committed `results/` come from training a large model (width
+200000 x 6 layers, ~1.2M trainable tables) on the full set for 100 epochs with no
+regularization, on a single RTX 3090:
 
 ```bash
-uv run python train.py --train-size 2000 --num-bits 3 --width 16000 --layers 5 --epochs 200
+uv run python train.py --device cuda --train-size 0 --num-bits 3 --width 200000 --layers 6 --batch-size 1024 --lr 2e-2 --epochs 100
 ```
 
 ![learning curves](results/curves.png)
 
 The growing **gap** between the train curve and the val/test curves - train accuracy and
 perplexity racing ahead while validation/test stall - is overfitting, exactly what we wanted
-to demonstrate with no regularization and no augmentation.
+to demonstrate with no regularization and no augmentation. A larger model has more capacity,
+so it fits the training set harder and the gap grows wider.
 
 ## Knobs to play with
 
 All in `train.py --help`: `--num-bits` (thermometer resolution), `--width` / `--layers`
-(network capacity - more neurons overfit harder), `--train-size`, `--lr`, `--epochs`.
+(network capacity - wider overfits harder; keep `--layers` small per the scaling law above),
+`--train-size`, `--lr`, `--epochs`.
