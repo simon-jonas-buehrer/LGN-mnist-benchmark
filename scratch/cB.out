@@ -1,3 +1,0 @@
-srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
-srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
-############ conj K64 ############

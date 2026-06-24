@@ -1,6 +1,0 @@
-#!/bin/bash
-export PYTHONUNBUFFERED=1
-.venv/bin/python -u scratch/grow_lut.py --device cuda --train-size 0 --num-bits 5 \
-  --window-factor 8 --fan-in 4 --max-gates 400000 --build-per-phase 2000 --build-batch 64 \
-  --cd-fraction 0.5 --cd-flips 1024 --cd-batch 8192 --depth-penalty 2.0 \
-  --final-cd-flips 10000000 --eval-every 10
