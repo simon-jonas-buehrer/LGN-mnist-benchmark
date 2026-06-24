@@ -4,48 +4,45 @@ A scratch experiment: build the same kind of boolean-gate circuit as model.py, b
 gradients at all. Everything is binary and bitpacked, so building and inference are a few GPU
 matmuls and bit ops.
 
-Architecture: one window
-------------------------
-There is a single fixed window of WIN = f * N signal slots (f defaults to 4):
+The window
+----------
+The whole model is one fixed window of WIN = f * N slots, which is also the entire head. It
+starts as f tiled copies of the N thermometer bits (input j's f copies are spread over f
+different classes (j+k)%C, so no class group holds the same input twice). The GroupSum head
+sums the window by class (class = slot % C, H = WIN / C slots per class, score divided by
+tau = sqrt(H)); since tau is equal across classes it does not affect the argmax. So the
+classifier is a vote: the class with the most firing slots wins.
 
-    slot 0 .. N-1        the N input bits from the thermometer encoder (frozen)
-    slot N .. WIN-1      start at 0, filled by gates as we build
+Build (no backprop)
+-------------------
+Every slot is buildable. Each phase, on a tiny random batch, we *replace* a chunk of random
+slots (each an input copy or an existing gate) with fresh 2-input AND gates:
 
-Every slot is also a head output bit. The GroupSum head reads the *whole window*: a slot's
-class is slot % C (round-robin, so the input bits spread evenly over the 10 classes), each
-class owns H = WIN / C slots, and the class score is the popcount of its slots, divided by
-tau = sqrt(H). Because H * C = WIN = f * N, the "(B,N) -> (B,H*C)" map is just "fill the
-window". This unifies the signal pool, the output bits and the depth wiring into one array.
+  1. residual per target slot in {-1,0,+1} from the multiclass-hinge subgradient: fire more
+     where its class should go up but it is 0, fire less where its class should go down but it
+     is 1.
+  2. sample candidate input signals from the inverse-path-length distribution (weight
+     ~ 1/(1+depth)^depth_pen / (1+usage)^usage_pen, so shallow lightly-used slots are preferred);
+     correlate them with the residual (covariance over the batch).
+  3. wire the top-2 by covariance into an AND of the two (optionally NOT-ed) inputs. Exploration
+     comes from the tiny build batch (noisy covariance) plus the sampling, not from any noise
+     term. CD later reaches all 16 two-input functions.
 
-Building, no backprop
----------------------
-Each build sweep, on a random batch:
-
-  1. residual per slot in {-1,0,+1}: a class-c slot wants to fire more where class c should go
-     up (multiclass-hinge subgradient) but the slot is currently 0, and fire less where class c
-     should go down but the slot is currently 1. So every slot chases its own mistakes.
-  2. correlate every filled slot against every buildable slot's residual: a
-     (filled x buildable) ~ f*N^2 covariance matrix, one matmul (chunked over targets).
-  3. for the strongest target slots, take the top-2 correlating signals and wire an AND/OR gate
-     with NOTs on the negatively correlated inputs.
-
-Empty slots have the biggest residual, so they fill first; later sweeps refine filled slots.
-New gates can read any filled slot, including earlier gates, which gives depth.
+Building both forms and deepens the circuit; once every copy has been rebuilt no raw inputs
+remain in the pool.
 
 Coordinate descent
--------------------
-Greedy wiring overfits the batch it saw, so we periodically run CD: take a batch and, for a
-sample of gate slots, try flipping each of the 4 truth-table bits; keep the flip that most
-lowers the batch hinge loss. Because the head sums the window, flipping one slot's gate only
-changes that slot's class score, so the loss delta is exact and computed in closed form for all
-candidate gates and all 4 flips at once. CD explores all 16 two-input functions, not just the
-AND/OR we started from.
+------------------
+Randomized: pick random gate slots, pick one random truth-table bit on each, flip iff it lowers
+the batch hinge loss (computed in closed form, since flipping a slot only moves its own class
+score). No sorting, no picking the best. Each phase runs CD bitflips = cd_fraction * WIN, and an
+optional long final CD-only annealing phase polishes at the end.
 
-Over the run we ramp from "lots of build, little CD" to "little build, lots of CD".
+Inference replays the ordered op-history (vectorized, exact) on fresh images.
 
 Run
 ---
-    .venv/bin/python scratch/grow_lut.py --device cuda --train-size 0
+    .venv/bin/python scratch/grow_lut.py --device cuda --train-size 0 --window-factor 8 --rebuild
     bash scratch/run_srun.sh            # interactive single GPU
     sbatch scratch/run.sbatch           # batch single GPU
 """
@@ -134,7 +131,7 @@ def apply_gate(a: torch.Tensor, b: torch.Tensor, tt: torch.Tensor) -> torch.Tens
 # ======================================================================================
 class GrownCircuit:
     def __init__(self, n_inputs: int, n_classes: int, window_factor: float,
-                 *, gate: str, max_gates: int, device: str):
+                 *, max_gates: int, device: str):
         self.N = n_inputs
         self.C = n_classes
         win = int(round(window_factor * n_inputs))
@@ -142,7 +139,6 @@ class GrownCircuit:
         self.WIN = win
         self.H = win // n_classes
         self.tau = math.sqrt(self.H)
-        self.gate = gate
         self.max_gates = max_gates
         self.device = device
 
@@ -226,7 +222,7 @@ class GrownCircuit:
     # -- build --------------------------------------------------------------------------
     def build_sweep(self, y: torch.Tensor, bidx: torch.Tensor, n_build: int,
                     depth_pen: float = 1.0, usage_pen: float = 0.3, max_feats: int = 16384,
-                    rebuild: bool = False, chunk: int = 8192) -> int:
+                    explore_frac: float = 0.0, chunk: int = 8192) -> int:
         """Wire up to n_build slots this sweep. Normally fills empty slots; once the window is
         full and rebuild=True, it re-wires existing gate slots into (possibly deeper)
         compositions over the now-rich pool, so depth keeps growing with a fixed window. Each
@@ -282,20 +278,32 @@ class GrownCircuit:
         b_slot = feats[best_fi[:, 1]]
         pa = best_val[:, 0] >= 0                                   # NOT the input if corr is negative
         pb = best_val[:, 1] >= 0
-        self._write(tgt, a_slot, b_slot, self._init_tt(pa, pb))
+        tt = self._init_tt(pa, pb)
+
+        # exploration: a fraction of gates are built RANDOMLY -- a random input pair and a random
+        # non-constant truth table -- not by correlation. This is the only way to reach interaction
+        # features (e.g. XOR) whose two inputs are individually uncorrelated with the error, which
+        # greedy correlation can never pick. Useless random gates get rebuilt / CD'd away over
+        # time; useful ones survive and can feed later gates.
+        if explore_frac > 0:
+            ne = int(round(explore_frac * tgt.numel()))
+            if ne > 0:
+                e = torch.randperm(tgt.numel(), device=self.device)[:ne]
+                a_slot[e] = feats[torch.randint(feats.numel(), (ne,), device=self.device)]
+                b_slot[e] = feats[torch.randint(feats.numel(), (ne,), device=self.device)]
+                fn = torch.randint(1, 15, (ne,), device=self.device)   # 1..14: skip FALSE/TRUE
+                tt[e] = torch.stack([(fn >> 3) & 1, (fn >> 2) & 1, (fn >> 1) & 1, fn & 1],
+                                    dim=1).bool()
+
+        self._write(tgt, a_slot, b_slot, tt)
         return n
 
     def _init_tt(self, pa: torch.Tensor, pb: torch.Tensor) -> torch.Tensor:
-        """AND/OR of two optionally-negated inputs as a (k,4) truth table [f00,f01,f10,f11]."""
+        """AND of two optionally-negated inputs as a (k,4) truth table [f00,f01,f10,f11]: fire only
+        on the cell where both inputs match their wanted polarity. CD later reaches all 16 funcs."""
         k = pa.shape[0]
-        ar = torch.arange(k, device=self.device)
-        ai, bi = pa.long(), pb.long()
         tt = torch.zeros((k, 4), dtype=torch.bool, device=self.device)
-        if self.gate == "and":
-            tt[ar, ai * 2 + bi] = True                             # fire only on the matching cell
-        else:
-            tt[:] = True
-            tt[ar, (1 - ai) * 2 + (1 - bi)] = False                # off only where neither matches
+        tt[torch.arange(k, device=self.device), pa.long() * 2 + pb.long()] = True
         return tt
 
     def _write(self, slots: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
@@ -430,8 +438,20 @@ class GrownCircuit:
 # Encoding + training loop
 # ======================================================================================
 def encode(images: torch.Tensor, enc: Thermometer) -> torch.Tensor:
-    """(D,3,32,32) -> (N, D) uint8 binary."""
+    """(D,3,32,32) -> (N, D) uint8 binary via the thermometer encoder."""
     return enc(images).flatten(1).t().contiguous().to(torch.uint8)
+
+
+def encode_bitplane(images: torch.Tensor) -> torch.Tensor:
+    """(D,3,32,32) in [0,1] -> (N=3*8*32*32, D) uint8: the 8 raw bit-planes of each uint8 pixel.
+
+    Unlike the thermometer (monotone thresholds), this passes every bit of the pixel value
+    including low-order precision bits, so no magnitude information is quantized away."""
+    q = (images.clamp(0, 1) * 255).round().to(torch.int32)        # (D,3,32,32) pixel value 0..255
+    sh = torch.arange(8, device=images.device, dtype=torch.int32)
+    bits = (q.unsqueeze(2) >> sh.view(1, 1, 8, 1, 1)) & 1          # (D,3,8,32,32)
+    b, c, k, h, w = bits.shape
+    return bits.reshape(b, c * k, h, w).flatten(1).t().contiguous().to(torch.uint8)
 
 
 def render_animation(snaps: list[dict], out_path: Path) -> None:
@@ -497,11 +517,12 @@ def main() -> None:
     # i.e. b*f must be a multiple of 5. The defaults b=5, f=2 satisfy this exactly (N=15360,
     # WIN=30720, H=WIN/C=3072). The code trims WIN to a multiple of C anyway, as a safety net.
     p.add_argument("--num-bits", type=int, default=5, help="thermometer bits per channel (b)")
+    p.add_argument("--encoder", choices=["thermometer", "bitplane"], default="thermometer",
+                   help="thermometer thresholds, or the raw 8 bit-planes of each uint8 pixel")
     p.add_argument("--window-factor", type=float, default=2.0, help="window = f * N slots")
     p.add_argument("--max-gates", type=int, default=200000, help="upper limit on gates built")
     p.add_argument("--max-feats", type=int, default=16384,
                    help="cap on pool signals correlated per build sweep (bounds the matmul)")
-    p.add_argument("--gate", choices=["and", "or"], default="and", help="initial gate family")
     p.add_argument("--depth-penalty", type=float, default=2.0,
                    help="sharpness of the inverse-path-length input sampling (weight ~ 1/(1+depth)^this)")
     p.add_argument("--usage-penalty", type=float, default=0.3,
@@ -511,6 +532,9 @@ def main() -> None:
                         "(depth grows with a fixed window) until --max-gates build-ops")
     p.add_argument("--build-batch", type=int, default=64,
                    help="samples per build correlation (small = noisy cov = exploration)")
+    p.add_argument("--explore-frac", type=float, default=0.0,
+                   help="fraction of each build phase built as RANDOM gates (random inputs + random "
+                        "truth table), to reach interaction features greedy correlation misses")
     p.add_argument("--cd-batch", type=int, default=16384, help="samples per CD pass (large = less overfit)")
     p.add_argument("--cd-flips", type=int, default=8192,
                    help="random (gate,bit) flips attempted per CD call; kept only if they help")
@@ -543,12 +567,15 @@ def main() -> None:
     pool_x, pool_y = work_x[:-n_val], work_y[:-n_val]
     print(f"train={len(pool_x)} val={len(val_x)} test={len(test_x)}", flush=True)
 
-    enc = Thermometer(num_bits=args.num_bits).fit(pool_x[:2000])
-    Xtr, Xva, Xte = encode(pool_x, enc), encode(val_x, enc), encode(test_x, enc)
+    if args.encoder == "bitplane":
+        Xtr, Xva, Xte = encode_bitplane(pool_x), encode_bitplane(val_x), encode_bitplane(test_x)
+    else:
+        enc = Thermometer(num_bits=args.num_bits).fit(pool_x[:2000])
+        Xtr, Xva, Xte = encode(pool_x, enc), encode(val_x, enc), encode(test_x, enc)
     n_inputs = Xtr.shape[0]
     ytr = pool_y.to(dev)
 
-    circ = GrownCircuit(n_inputs, 10, args.window_factor, gate=args.gate,
+    circ = GrownCircuit(n_inputs, 10, args.window_factor,
                         max_gates=args.max_gates, device=dev)
     circ.set_inputs(Xtr)
     exact = (n_inputs * args.window_factor) % 10 == 0
@@ -603,7 +630,7 @@ def main() -> None:
         phase += 1
         built = circ.build_sweep(ytr, rbatch(args.build_batch), args.build_per_phase,
                                  depth_pen=args.depth_penalty, usage_pen=args.usage_penalty,
-                                 max_feats=args.max_feats)
+                                 max_feats=args.max_feats, explore_frac=args.explore_frac)
         flips = cd_phase()
         if phase % args.eval_every == 0:
             show(f"p{phase}", built, flips)

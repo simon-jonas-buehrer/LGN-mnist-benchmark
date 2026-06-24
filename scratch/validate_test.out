@@ -1,0 +1,7 @@
+srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
+srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
+############ f=8 NO validate (baseline) ############
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd: error: *** STEP 2090906.0 ON tikgpu06 CANCELLED AT 2026-06-24T11:32:49 ***
+srun: error: tikgpu06: task 0: Terminated
+srun: Terminating StepId=2090906.0
