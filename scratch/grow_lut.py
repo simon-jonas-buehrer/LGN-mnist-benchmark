@@ -59,10 +59,16 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from model import Thermometer  # noqa: E402
 from train import load_cifar10  # noqa: E402
+
+# The 16 two-input boolean functions, indexed by f00*8 + f01*4 + f10*2 + f11 (the truth table
+# [f00,f01,f10,f11] read as a 4-bit number). Used to label what each grown gate became.
+FN_NAMES = ["FALSE", "AND", "a&!b", "a", "!a&b", "b", "XOR", "OR",
+            "NOR", "XNOR", "!b", "a|!b", "!a", "!a|b", "NAND", "TRUE"]
 
 
 # ======================================================================================
@@ -89,10 +95,18 @@ def pack_bits(bits: torch.Tensor) -> torch.Tensor:
     return (bits << _shifts(bits.device)).sum(-1)
 
 
-def unpack_bits(words: torch.Tensor, d: int) -> torch.Tensor:
-    """(n, W) int64 -> (n, D) uint8. (x >> s) & 1 recovers bit s for s in 0..63."""
-    bits = (words.unsqueeze(-1) >> _shifts(words.device)) & 1
-    return bits.reshape(words.shape[0], -1)[:, :d].to(torch.uint8)
+def unpack_bits(words: torch.Tensor, d: int, word_chunk: int = 32) -> torch.Tensor:
+    """(n, W) int64 -> (n, D) uint8. (x >> s) & 1 recovers bit s for s in 0..63. Done in word
+    chunks and cast to uint8 immediately so the int64 (n, chunk, 64) temporary stays small
+    (unpacking a whole large window at once otherwise blows up to many GB)."""
+    n, w = words.shape
+    sh = _shifts(words.device)
+    out = torch.empty((n, w * 64), dtype=torch.uint8, device=words.device)
+    for c0 in range(0, w, word_chunk):
+        wc = words[:, c0:c0 + word_chunk]
+        bitc = ((wc.unsqueeze(-1) >> sh) & 1).to(torch.uint8)      # (n, cw, 64)
+        out[:, c0 * 64:(c0 + wc.shape[1]) * 64] = bitc.reshape(n, -1)
+    return out[:, :d]
 
 
 def gather_batch(words: torch.Tensor, slots: torch.Tensor, bidx: torch.Tensor) -> torch.Tensor:
@@ -179,32 +193,38 @@ class GrownCircuit:
 
     # -- build --------------------------------------------------------------------------
     def build_sweep(self, y: torch.Tensor, bidx: torch.Tensor, n_build: int,
-                    explore_temp: float = 0.7, depth_pen: float = 0.5,
-                    usage_pen: float = 0.3, max_feats: int = 16384, chunk: int = 8192) -> int:
-        """Fill up to n_build empty slots this sweep. Each empty slot is wired to a 2-input gate
-        over the pool, chosen by correlating pool signals with the slot's residual. Scales to a
-        huge window: we correlate only a capped, sampled feature set against just the slots we
-        fill this sweep, so cost is O(max_feats * n_build * Bb), not O(window^2)."""
+                    depth_pen: float = 1.0, usage_pen: float = 0.3, max_feats: int = 16384,
+                    rebuild: bool = False, chunk: int = 8192) -> int:
+        """Wire up to n_build slots this sweep. Normally fills empty slots; once the window is
+        full and rebuild=True, it re-wires existing gate slots into (possibly deeper)
+        compositions over the now-rich pool, so depth keeps growing with a fixed window. Each
+        target is wired to a 2-input gate chosen by correlating pool signals with the slot's
+        residual. Scales: we correlate only a capped, sampled feature set against just the slots
+        wired this sweep, so cost is O(max_feats * n_build * Bb), not O(window^2)."""
         if self.n_gates_built >= self.max_gates:
             return 0
         empties = self.buildable[~self.filled[self.buildable]]
-        if empties.numel() == 0:
+        if empties.numel() > 0:
+            pool_t = empties
+        elif rebuild:
+            pool_t = self.buildable                                # re-wire gate slots to deepen
+        else:
             return 0
-        n = min(n_build, empties.numel(), self.max_gates - self.n_gates_built)
-        tgt = empties[torch.randperm(empties.numel(), device=self.device)[:n]]  # slots to fill now
+        n = min(n_build, pool_t.numel(), self.max_gates - self.n_gates_built)
+        tgt = pool_t[torch.randperm(pool_t.numel(), device=self.device)[:n]]  # slots to wire now
         d, _ = self.class_direction(y, bidx)
 
-        # candidate input signals: all filled slots, capped by sampling that prefers shallow,
-        # lightly-used slots (Gumbel-top-k over the depth/usage bias). Keeps the matmul bounded.
+        # candidate input signals: sample max_feats filled slots from the path-length
+        # distribution, weight ~ 1/(1+depth)^depth_pen / (1+usage)^usage_pen. Shallow, lightly-used
+        # slots are picked most, so the correlation is computed against a mostly-shallow candidate
+        # set; deep slots still appear sometimes. There is no Gumbel here -- the exploration comes
+        # from this sampling plus the deliberately tiny build batch (noisy covariance), which lets
+        # lower-covariance, not-yet-used inputs win on some sweeps.
         feats = self.filled.nonzero(as_tuple=False).flatten()
-        fbias_all = (-depth_pen * self.depth[feats].to(torch.float32)
-                     - usage_pen * torch.log1p(self.usage[feats].to(torch.float32)))
+        w = torch.exp(-depth_pen * torch.log1p(self.depth[feats].to(torch.float32))
+                      - usage_pen * torch.log1p(self.usage[feats].to(torch.float32)))
         if feats.numel() > max_feats:
-            gsel = -torch.log(-torch.log(torch.rand_like(fbias_all).clamp_min(1e-12)))
-            keep = (fbias_all + gsel).topk(max_feats).indices
-            feats, feat_bias = feats[keep], fbias_all[keep]
-        else:
-            feat_bias = fbias_all
+            feats = feats[torch.multinomial(w, max_feats, replacement=False)]
         fb = gather_batch(self.win, feats, bidx)
         fb = fb - fb.mean(1, keepdim=True)
 
@@ -217,18 +237,13 @@ class GrownCircuit:
         r[(db < 0) & (v == 1)] = -1.0
         rc = r - r.mean(1, keepdim=True)
 
-        # exploratory top-2 inputs per target: Gumbel-perturbed |cov|, biased toward shallow,
-        # lightly-used slots, so gates spread over the pool instead of reusing the same signals.
+        # top-2 inputs per target by plain covariance over the sampled candidate set.
         best_val = torch.zeros((n, 2), device=self.device)
         best_fi = torch.zeros((n, 2), dtype=torch.long, device=self.device)
         for s in range(0, n, chunk):
             cov = fb @ rc[s:s + chunk].T                           # (K, |chunk|) correlation scores
             self_mask = feats[:, None] == tgt[s:s + chunk][None, :]
-            key = torch.log(cov.abs() + 1e-9) + feat_bias[:, None]
-            if explore_temp > 0:
-                key = key + explore_temp * (
-                    -torch.log(-torch.log(torch.rand_like(key).clamp_min(1e-12))))
-            key = key.masked_fill(self_mask, float("-inf"))        # never use a slot as its own input
+            key = cov.abs().masked_fill(self_mask, -1.0)           # never use a slot as its own input
             _, idx = key.topk(min(2, key.shape[0]), dim=0)
             best_fi[s:s + chunk] = idx.T
             best_val[s:s + chunk] = cov.gather(0, idx).T           # signed cov sets the NOT polarity
@@ -351,12 +366,37 @@ class GrownCircuit:
             win[: self.N] = pack_bits(xb)
             for slots, a, b, tt in self.ops:                       # each batch reads earlier state
                 win[slots] = apply_gate(win[a], win[b], tt)
-            bits = unpack_bits(win, xb.shape[1]).to(torch.float32)
+            # sum window bits into class scores in slot chunks (never unpack the whole window)
             score = torch.zeros((self.C, xb.shape[1]), device=self.device)
-            score.index_add_(0, self.class_of, bits)
+            for s0 in range(0, self.WIN, 8192):
+                sl = slice(s0, s0 + 8192)
+                b = unpack_bits(win[sl], xb.shape[1]).to(torch.float32)
+                score.index_add_(0, self.class_of[sl], b)
             pred = (score / self.tau).argmax(0).cpu()
             correct += (pred == y[i:i + batch]).sum().item()
         return 100.0 * correct / d
+
+    # -- visualization snapshot ---------------------------------------------------------
+    @torch.no_grad()
+    def snapshot(self, grid: int = 180) -> dict:
+        """Compact picture of the network right now, for the build animation:
+        a depth map of the window, the histogram of which of the 16 boolean functions the gates
+        became, and the depth distribution."""
+        gate = self.filled & (torch.arange(self.WIN, device=self.device) >= self.N)
+        tt = self.def_tt[gate]                                      # (G, 4) [f00,f01,f10,f11]
+        fn_idx = (tt[:, 0].long() * 8 + tt[:, 1].long() * 4
+                  + tt[:, 2].long() * 2 + tt[:, 3].long())          # 0..15
+        fn = torch.bincount(fn_idx, minlength=16).cpu().numpy()
+        dep = self.depth[self.filled]
+        dcounts = torch.bincount(dep, minlength=10).cpu().numpy()
+        # window depth map: -1 empty, 0 input bit, >=1 gate depth; max-pooled to a small image
+        cols = int(math.ceil(self.WIN ** 0.5))
+        rows = int(math.ceil(self.WIN / cols))
+        val = torch.full((rows * cols,), -1.0, device=self.device)
+        val[: self.WIN] = torch.where(self.filled, self.depth.float(), torch.tensor(-1.0, device=self.device))
+        img = F.adaptive_max_pool2d(val.view(1, 1, rows, cols),
+                                    (min(grid, rows), min(grid, cols)))[0, 0].cpu().numpy()
+        return {"gates": int(gate.sum()), "fn": fn, "depth": dcounts, "img": img}
 
 
 # ======================================================================================
@@ -365,6 +405,53 @@ class GrownCircuit:
 def encode(images: torch.Tensor, enc: Thermometer) -> torch.Tensor:
     """(D,3,32,32) -> (N, D) uint8 binary."""
     return enc(images).flatten(1).t().contiguous().to(torch.uint8)
+
+
+def render_animation(snaps: list[dict], out_path: Path) -> None:
+    """Animate the grown network: window depth map, the 16-function histogram, the depth
+    distribution and the accuracy curve, one frame per recorded phase."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    phases = [s["phase"] for s in snaps]
+    maxd = max(len(s["depth"]) for s in snaps)
+    fig, ax = plt.subplots(2, 2, figsize=(13, 9))
+    (a_img, a_fn), (a_dep, a_acc) = ax
+
+    def update(i):
+        s = snaps[i]
+        for a in (a_img, a_fn, a_dep, a_acc):
+            a.clear()
+        im = a_img.imshow(s["img"], cmap="turbo", vmin=-1, vmax=max(2, maxd - 1))
+        a_img.set_title(f"window  (slot depth; dark=empty)   gates={s['gates']:,}")
+        a_img.set_xticks([]); a_img.set_yticks([])
+
+        a_fn.bar(range(16), s["fn"], color="tab:blue")
+        a_fn.set_xticks(range(16)); a_fn.set_xticklabels(FN_NAMES, rotation=90, fontsize=8)
+        a_fn.set_title("which of the 16 gates"); a_fn.set_ylabel("count")
+
+        dd = s["depth"]
+        a_dep.bar(range(len(dd)), dd, color="tab:green")
+        a_dep.set_title("slot depth distribution"); a_dep.set_xlabel("depth")
+        a_dep.set_ylabel("slots")
+
+        j = i + 1
+        a_acc.plot(phases[:j], [t["tr"] for t in snaps[:j]], label="train", color="tab:blue")
+        a_acc.plot(phases[:j], [t["va"] for t in snaps[:j]], label="val", color="tab:orange")
+        a_acc.plot(phases[:j], [t["te"] for t in snaps[:j]], label="test", color="tab:green")
+        a_acc.set_xlim(0, max(phases)); a_acc.set_ylim(0, max(60, max(t["te"] for t in snaps) + 5))
+        a_acc.set_title(f"accuracy   phase {s['phase']}   test={s['te']:.1f}%")
+        a_acc.set_xlabel("phase"); a_acc.legend(loc="lower right"); a_acc.grid(alpha=0.3)
+        fig.suptitle("backprop-free LUT network: greedy build + coordinate descent", fontsize=13)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        return []
+
+    anim = FuncAnimation(fig, update, frames=len(snaps), blit=False)
+    anim.save(str(out_path), writer=PillowWriter(fps=3))
+    plt.close(fig)
+    print(f"wrote animation: {out_path}  ({len(snaps)} frames)", flush=True)
 
 
 def main() -> None:
@@ -381,13 +468,15 @@ def main() -> None:
     p.add_argument("--max-feats", type=int, default=16384,
                    help="cap on pool signals correlated per build sweep (bounds the matmul)")
     p.add_argument("--gate", choices=["and", "or"], default="and", help="initial gate family")
-    p.add_argument("--explore-temp", type=float, default=0.7,
-                   help="Gumbel temperature for stochastic input selection (0 = strict top-2)")
-    p.add_argument("--depth-penalty", type=float, default=0.5,
-                   help="bias against using deep slots as inputs (keeps circuits shallow)")
+    p.add_argument("--depth-penalty", type=float, default=1.0,
+                   help="sharpness of the inverse-path-length input sampling (weight ~ 1/(1+depth)^this)")
     p.add_argument("--usage-penalty", type=float, default=0.3,
                    help="bias against reusing already heavily-used slots as inputs")
-    p.add_argument("--build-batch", type=int, default=8192, help="samples per build correlation")
+    p.add_argument("--rebuild", action="store_true",
+                   help="after the window is full, keep re-wiring slots into deeper gates "
+                        "(depth grows with a fixed window) until --max-gates build-ops")
+    p.add_argument("--build-batch", type=int, default=64,
+                   help="samples per build correlation (small = noisy cov = exploration)")
     p.add_argument("--cd-batch", type=int, default=16384, help="samples per CD pass (large = less overfit)")
     p.add_argument("--cd-flips", type=int, default=8192,
                    help="random (gate,bit) flips attempted per CD call; kept only if they help")
@@ -398,6 +487,8 @@ def main() -> None:
     p.add_argument("--extra-cd-phases", type=int, default=30,
                    help="CD-only phases after the window is full")
     p.add_argument("--eval-every", type=int, default=3, help="phases between evals")
+    p.add_argument("--viz", action="store_true", help="record a per-phase build animation")
+    p.add_argument("--viz-out", type=Path, default=Path("scratch/grow_anim.gif"))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -441,6 +532,15 @@ def main() -> None:
               f"{circ.evaluate(Xte, test_y):6.2f} | {time.time() - t0:4.0f}s", flush=True)
 
     show("base", 0, 0)  # inputs only, before any gate
+    snaps: list[dict] = []
+
+    def record(phase: int) -> None:
+        if not args.viz:
+            return
+        s = circ.snapshot()
+        s.update(phase=phase, tr=circ.evaluate(Xtr, pool_y), va=circ.evaluate(Xva, val_y),
+                 te=circ.evaluate(Xte, test_y))
+        snaps.append(s)
 
     # Each phase: build a chunk of gates, then run CD bitflips equal to a fraction of all gates
     # built so far. Build is constant per phase while the gate count grows, so CD automatically
@@ -459,15 +559,18 @@ def main() -> None:
     while True:
         phase += 1
         built = circ.build_sweep(ytr, rbatch(args.build_batch), args.build_per_phase,
-                                 explore_temp=args.explore_temp, depth_pen=args.depth_penalty,
-                                 usage_pen=args.usage_penalty)
+                                 depth_pen=args.depth_penalty, usage_pen=args.usage_penalty,
+                                 max_feats=args.max_feats, rebuild=args.rebuild)
         flips = cd_phase()
-        window_full = not (~circ.filled[circ.buildable]).any() or circ.n_gates_built >= args.max_gates
-        if window_full and full_at is None:
+        full = not (~circ.filled[circ.buildable]).any()
+        if full and full_at is None:
             full_at = phase
-        if phase % args.eval_every == 0 or window_full:
+        if phase % args.eval_every == 0 or (full and full_at == phase):
             show(f"p{phase}", built, flips)
-        if full_at is not None and phase >= full_at + args.extra_cd_phases:
+        record(phase)
+        if circ.n_gates_built >= args.max_gates:
+            break
+        if not args.rebuild and full_at is not None and phase >= full_at + args.extra_cd_phases:
             break
 
     tr, va, te = (circ.evaluate(Xtr, pool_y), circ.evaluate(Xva, val_y),
@@ -478,6 +581,10 @@ def main() -> None:
     print(f"depth: mean={gd.float().mean():.2f}  max={int(gd.max())}  "
           f"usage: mean={circ.usage[circ.filled].float().mean():.2f}  "
           f"max={int(circ.usage.max())}", flush=True)
+
+    if args.viz and snaps:
+        args.viz_out.parent.mkdir(parents=True, exist_ok=True)
+        render_animation(snaps, args.viz_out)
 
 
 if __name__ == "__main__":
