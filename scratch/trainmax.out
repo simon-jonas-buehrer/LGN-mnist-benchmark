@@ -1,9 +1,0 @@
-srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
-srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
-############ f=8 cd-fraction=1.0 (train-max) ############
-   p25 |   50000 |  2000 | 122880 |  19.61 |  19.20 |  19.39 |   21s
-   p50 |  100000 |  2000 | 122880 |  23.39 |  23.36 |  22.78 |   42s
-   p75 |  150000 |  2000 | 122880 |  25.79 |  24.74 |  24.70 |   66s
-FINAL  gates=400000  ops=7177  train=25.02  val=24.42  test=24.19
-depth(gates): mean=2.52  max=8  raw-copies-left=4608  usage-max=147
-############ f=8 cd-fraction=2.0 (train-max) ############
