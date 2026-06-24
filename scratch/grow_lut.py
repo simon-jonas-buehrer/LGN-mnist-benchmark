@@ -523,7 +523,8 @@ def main() -> None:
     p.add_argument("--final-cd-flips", type=int, default=0,
                    help="long CD-only annealing after the gate budget: total random bitflips")
     p.add_argument("--eval-every", type=int, default=3, help="phases between evals")
-    p.add_argument("--viz", action="store_true", help="record a per-phase build animation")
+    p.add_argument("--viz", action="store_true", help="record a build animation")
+    p.add_argument("--viz-every", type=int, default=1, help="phases between animation frames")
     p.add_argument("--viz-out", type=Path, default=Path("scratch/grow_anim.gif"))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -578,7 +579,7 @@ def main() -> None:
     snaps: list[dict] = []
 
     def record(phase: int) -> None:
-        if not args.viz:
+        if not args.viz or phase % args.viz_every != 0:
             return
         s = circ.snapshot()
         s.update(phase=phase, n_built=circ.n_gates_built,
