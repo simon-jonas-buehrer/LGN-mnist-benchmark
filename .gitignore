@@ -10,5 +10,6 @@ data/
 
 # local scratch and cluster logs
 .local/
+scratch/grow.log
 
 # the trained checkpoint in results/ is committed on purpose, so it stays tracked.
