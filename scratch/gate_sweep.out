@@ -1,0 +1,10 @@
+srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
+srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
+############ gate=and ############
+FINAL  gates=150000  ops=1486  train=29.36  val=28.28  test=28.35
+depth: mean=1.96  max=8  usage: mean=4.88  max=860
+BEST  val=29.38  test=28.99  at phase 18  gates=142080
+############ gate=or ############
+FINAL  gates=150000  ops=1486  train=28.14  val=26.92  test=27.93
+depth: mean=2.05  max=8  usage: mean=4.88  max=860
+BEST  val=27.74  test=28.03  at phase 18  gates=142080

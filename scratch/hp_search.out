@@ -1,0 +1,48 @@
+srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
+srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
+############ build-batch=64  build-per-phase=2000  cd-fraction=0.0 ############
+FINAL  gates=150000  ops=76  train=12.80  val=11.66  test=12.76
+depth: mean=1.87  max=9  usage: mean=4.88  max=392
+BEST  val=22.42  test=22.82  at phase 24  gates=46080
+############ build-batch=64  build-per-phase=2000  cd-fraction=0.25 ############
+FINAL  gates=150000  ops=5725  train=39.05  val=36.98  test=35.75
+depth: mean=2.01  max=11  usage: mean=4.88  max=245
+BEST  val=35.68  test=36.36  at phase 72  gates=142080
+############ build-batch=64  build-per-phase=16000  cd-fraction=0.0 ############
+FINAL  gates=150000  ops=10  train=12.56  val=12.82  test=11.65
+depth: mean=1.57  max=7  usage: mean=4.88  max=1661
+BEST  val=15.64  test=15.58  at phase 3  gates=46080
+############ build-batch=64  build-per-phase=16000  cd-fraction=0.25 ############
+FINAL  gates=150000  ops=851  train=27.04  val=25.66  test=25.91
+depth: mean=1.86  max=8  usage: mean=4.88  max=1661
+BEST  val=17.04  test=16.99  at phase 3  gates=46080
+############ build-batch=512  build-per-phase=2000  cd-fraction=0.0 ############
+FINAL  gates=150000  ops=76  train=9.45  val=9.24  test=9.16
+depth: mean=2.83  max=11  usage: mean=4.88  max=422
+BEST  val=25.98  test=25.11  at phase 30  gates=58080
+############ build-batch=512  build-per-phase=2000  cd-fraction=0.25 ############
+FINAL  gates=150000  ops=5726  train=34.83  val=33.90  test=33.42
+depth: mean=2.79  max=16  usage: mean=4.88  max=418
+BEST  val=32.92  test=32.70  at phase 66  gates=130080
+############ build-batch=512  build-per-phase=16000  cd-fraction=0.0 ############
+FINAL  gates=150000  ops=10  train=8.42  val=8.22  test=8.76
+depth: mean=2.72  max=7  usage: mean=4.88  max=1661
+BEST  val=19.74  test=20.62  at phase 3  gates=46080
+############ build-batch=512  build-per-phase=16000  cd-fraction=0.25 ############
+FINAL  gates=150000  ops=851  train=23.28  val=21.22  test=23.12
+depth: mean=2.47  max=7  usage: mean=4.88  max=1661
+BEST  val=21.12  test=21.94  at phase 3  gates=46080
+############ build-batch=4096  build-per-phase=2000  cd-fraction=0.0 ############
+FINAL  gates=150000  ops=76  train=10.30  val=10.04  test=9.91
+depth: mean=3.72  max=14  usage: mean=4.88  max=435
+BEST  val=24.52  test=24.05  at phase 30  gates=58080
+############ build-batch=4096  build-per-phase=2000  cd-fraction=0.25 ############
+FINAL  gates=150000  ops=5726  train=23.68  val=22.52  test=22.67
+depth: mean=5.15  max=20  usage: mean=4.88  max=630
+BEST  val=23.72  test=24.82  at phase 12  gates=24000
+############ build-batch=4096  build-per-phase=16000  cd-fraction=0.0 ############
+FINAL  gates=150000  ops=10  train=7.34  val=7.36  test=7.41
+depth: mean=2.90  max=7  usage: mean=4.88  max=3313
+############ build-batch=4096  build-per-phase=16000  cd-fraction=0.25 ############
+FINAL  gates=150000  ops=851  train=18.03  val=17.90  test=17.59
+depth: mean=3.02  max=9  usage: mean=4.88  max=3167
