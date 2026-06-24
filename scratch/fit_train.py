@@ -39,25 +39,6 @@ def train_acc(circ, y):
     return 100.0 * (circ.score.argmax(0) == y).float().mean().item()
 
 
-@torch.no_grad()
-def fast_eval(circ, build_ops, Xbits, y, batch=8192):
-    """Val/test accuracy: replay the build structure ONCE with current params (constant cost)."""
-    d = Xbits.shape[1]
-    correct = 0
-    for i in range(0, d, batch):
-        xb = Xbits[:, i:i + batch].to(circ.device)
-        win = pack_bits(xb)[circ.tile].contiguous()
-        for slots, ins, _ in build_ops:
-            win[slots] = circ.apply_full(win[ins], circ.def_p[slots])   # current params, not stored
-        score = torch.zeros((circ.C, xb.shape[1]), device=circ.device)
-        for s0 in range(0, circ.WIN, 8192):
-            sl = slice(s0, min(s0 + 8192, circ.WIN))
-            b = unpack_bits(win[sl], xb.shape[1]).to(torch.float32)
-            score.index_add_(0, circ.class_of[sl], b)
-        correct += (score.argmax(0).cpu() == y[i:i + batch]).sum().item()
-    return 100.0 * correct / d
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path, default=Path("data/cifar-10-batches-py"))
@@ -102,10 +83,8 @@ def main():
     while circ.n_gates_built < circ.WIN:
         circ.build_sweep(ytr, torch.randint(circ.D, (args.build_batch,), device=dev),
                          args.build_per_phase, depth_pen=2.0, usage_pen=0.3)
-    build_ops = list(circ.ops)                       # structure snapshot for fast eval
     print(f"built {circ.n_gates_built} gates in {time.time()-t0:.0f}s  "
-          f"train={train_acc(circ, ytr):.2f}  val={fast_eval(circ, build_ops, Xva, vy):.2f}\n",
-          flush=True)
+          f"train={train_acc(circ, ytr):.2f}  val={circ.evaluate(Xva, vy):.2f}\n", flush=True)
 
     print(f"{'flips':>12} | {'train':>6} | {'val':>6} | {'test':>6} | {'kfl/s':>6} | {'jacc':>9} | note",
           flush=True)
@@ -130,7 +109,7 @@ def main():
         note = ""
         if flips - last_val >= args.val_every:
             last_val = flips
-            va, te = fast_eval(circ, build_ops, Xva, vy), fast_eval(circ, build_ops, Xte, ey)
+            va, te = circ.evaluate(Xva, vy), circ.evaluate(Xte, ey)   # correct op-replay eval
         if tr >= args.target_train and not hit:
             hit = True
             note = f"<-- train target {args.target_train} reached; continuing CD for grokking"
