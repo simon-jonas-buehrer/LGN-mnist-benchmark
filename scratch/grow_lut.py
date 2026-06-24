@@ -134,15 +134,21 @@ def apply_gate(ins: torch.Tensor, tt: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def apply_conj(ins: torch.Tensor, act: torch.Tensor, pol: torch.Tensor) -> torch.Tensor:
-    """Packed K-input conjunction. ins: (n, K, W) int64; act, pol: (n, K) bool (input active? and
-    its polarity). Returns (n, W) = AND over active inputs of (input if pol else ~input). With the
-    AND structure shared, only 2K weight bits per gate -- linear in K instead of 2**K."""
-    n, k, w = ins.shape
-    out = ins.new_full((n, w), -1)                                 # all-ones (constant 1 if none active)
-    for i in range(k):
-        lit = torch.where(pol[:, i:i + 1], ins[:, i], ~ins[:, i])
-        out = torch.where(act[:, i:i + 1], out & lit, out)
+def apply_conj(ins: torch.Tensor, params: torch.Tensor, k: int, terms: int) -> torch.Tensor:
+    """Packed K-input C-term DNF gate. ins: (n, K, W) int64; params: (n, terms*2K) bool, each term
+    is (active?, polarity) per input. Returns (n, W) = OR over terms of (AND over a term's active
+    inputs of its literal). An empty term (no active inputs) contributes 0. terms*2K bits."""
+    n, _, w = ins.shape
+    out = ins.new_zeros((n, w))
+    for t in range(terms):
+        b = t * 2 * k
+        act, pol = params[:, b:b + k], params[:, b + k:b + 2 * k]
+        term = ins.new_full((n, w), -1)                            # all ones
+        for i in range(k):
+            lit = torch.where(pol[:, i:i + 1], ins[:, i], ~ins[:, i])
+            term = torch.where(act[:, i:i + 1], term & lit, term)
+        term = torch.where(act.any(1, keepdim=True), term, ins.new_zeros(()))  # empty term -> 0
+        out = out | term
     return out
 
 
@@ -151,15 +157,17 @@ def apply_conj(ins: torch.Tensor, act: torch.Tensor, pol: torch.Tensor) -> torch
 # ======================================================================================
 class GrownCircuit:
     def __init__(self, n_inputs: int, n_classes: int, window_factor: float,
-                 *, fan_in: int, gate_type: str, max_gates: int, device: str):
+                 *, fan_in: int, gate_type: str, terms: int = 1, max_gates: int, device: str):
         self.N = n_inputs
         self.C = n_classes
         self.K = fan_in
         self.gate_type = gate_type                                 # "lut" or "conj"
+        self.terms = terms                                         # DNF terms per conj gate
         self.TT = 1 << fan_in                                      # truth-table length 2**K
-        # Per-gate parameter bits: a full LUT is 2**K; a conjunction shares the AND structure and
-        # stores 2K bits (per input: active? and polarity), so it scales O(K), not 2**K.
-        self.P = self.TT if gate_type == "lut" else 2 * fan_in
+        # Per-gate parameter bits: a full LUT is 2**K; a conj gate is an OR of `terms` conjunctions,
+        # each 2K bits (per input: active? and polarity), so it stores terms*2K -- linear in K. A
+        # full LUT is the full DNF (up to 2**K minterms); conj keeps only `terms` of them.
+        self.P = self.TT if gate_type == "lut" else terms * 2 * fan_in
         win = int(round(window_factor * n_inputs))
         win -= win % n_classes                                     # clean multiple of C
         self.WIN = win
@@ -243,7 +251,7 @@ class GrownCircuit:
         """Gate output over all D: ins_words (n, K, W), params (n, P) -> (n, W)."""
         if self.gate_type == "lut":
             return apply_gate(ins_words, params)
-        return apply_conj(ins_words, params[:, :self.K], params[:, self.K:])
+        return apply_conj(ins_words, params, self.K, self.terms)
 
     def apply_batch(self, ins_slots: torch.Tensor, params: torch.Tensor,
                     bidx: torch.Tensor) -> torch.Tensor:
@@ -253,9 +261,15 @@ class GrownCircuit:
         if self.gate_type == "lut":
             cell = (bits.long() * self.pw.view(1, k, 1)).sum(1)    # (G, Bb)
             return params.gather(1, cell).to(torch.float32)
-        act, pol = params[:, :k, None], params[:, k:, None]
-        lit = torch.where(pol, bits, 1.0 - bits)
-        return torch.where(act, lit, torch.ones_like(bits)).prod(1)   # AND of active literals
+        out = torch.zeros((g, bits.shape[2]), device=self.device)  # OR over DNF terms
+        for t in range(self.terms):
+            b = t * 2 * k
+            act, pol = params[:, b:b + k, None], params[:, b + k:b + 2 * k, None]
+            lit = torch.where(pol, bits, 1.0 - bits)
+            term = torch.where(act, lit, torch.ones_like(bits)).prod(1)   # AND of active
+            term = torch.where(act.squeeze(-1).any(1, keepdim=True), term, torch.zeros_like(term))
+            out = torch.maximum(out, term)
+        return out
 
     # -- build --------------------------------------------------------------------------
     def build_sweep(self, y: torch.Tensor, bidx: torch.Tensor, n_build: int,
@@ -316,7 +330,11 @@ class GrownCircuit:
             p = torch.zeros((n, self.P), dtype=torch.bool, device=self.device)
             p[torch.arange(n, device=self.device), cell] = True
             return p
-        return torch.cat([torch.ones((n, self.K), dtype=torch.bool, device=self.device), pol], dim=1)
+        # conj: seed term 0 = AND of all K inputs at their polarity; other terms empty (output 0)
+        p = torch.zeros((n, self.P), dtype=torch.bool, device=self.device)
+        p[:, :self.K] = True                                       # term 0 active
+        p[:, self.K:2 * self.K] = pol                             # term 0 polarity
+        return p
 
     def _write(self, slots: torch.Tensor, ins: torch.Tensor, params: torch.Tensor) -> None:
         """Write K-input gate outputs into the slots; update scores, definitions and op history."""
@@ -497,7 +515,9 @@ def main() -> None:
     p.add_argument("--window-factor", type=float, default=8.0, help="window = f * N slots")
     p.add_argument("--fan-in", type=int, default=4, help="inputs per gate K")
     p.add_argument("--gate-type", choices=["lut", "conj"], default="lut",
-                   help="lut: full 2**K truth table. conj: shared-AND, 2K weights (scales O(K))")
+                   help="lut: full 2**K truth table. conj: DNF of `terms` conjunctions (scales O(K))")
+    p.add_argument("--terms", type=int, default=1,
+                   help="conj only: DNF terms per gate (each terms*2K bits); 1 = single conjunction")
     p.add_argument("--max-gates", type=int, default=400000, help="upper limit on gates built")
     p.add_argument("--max-feats", type=int, default=16384,
                    help="cap on pool signals correlated per build sweep (bounds the matmul)")
@@ -545,7 +565,8 @@ def main() -> None:
     ytr = pool_y.to(dev)
 
     circ = GrownCircuit(n_inputs, 10, args.window_factor, fan_in=args.fan_in,
-                        gate_type=args.gate_type, max_gates=args.max_gates, device=dev)
+                        gate_type=args.gate_type, terms=args.terms,
+                        max_gates=args.max_gates, device=dev)
     circ.set_inputs(Xtr)
     exact = (n_inputs * args.window_factor) % 10 == 0
     print(f"N={n_inputs}  WIN=f*N={circ.WIN}  H={circ.H}  K={circ.K}  gate={circ.gate_type}  "

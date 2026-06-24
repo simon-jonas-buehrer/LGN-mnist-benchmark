@@ -1,0 +1,7 @@
+srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
+srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
+############ conj K4 ############
+N=15360  WIN=f*N=122880  H=12288  K=4  gate=conj  P(bits/gate)=8  tau=110.9  exact=True
+FINAL  gates=150000  ops=9000  train=42.66  val=39.30  test=39.40
+BEST  val=39.30  test=39.40  at p150  gates=150000
+############ conj K8 ############
