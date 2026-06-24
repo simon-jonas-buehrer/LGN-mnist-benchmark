@@ -397,6 +397,46 @@ class GrownCircuit:
         self.ops.append((sel.clone(), self.def_in[sel].clone(), sel_p.clone()))
         return int(keep.sum().item())
 
+    def _batch_hinge(self, L: torch.Tensor, yb: torch.Tensor) -> torch.Tensor:
+        """Total multiclass hinge over a batch given class scores L (C, Bb) in COUNTS (pre-tau)."""
+        ar = torch.arange(yb.shape[0], device=self.device)
+        Lt = L / self.tau
+        m = torch.clamp(1.0 + Lt - Lt[yb, ar][None, :], min=0.0)
+        m[yb, ar] = 0.0
+        return m.sum()
+
+    def cd_joint(self, y: torch.Tensor, bidx: torch.Tensor, n_flip: int, n_bits: int = 1) -> int:
+        """Propose n_flip gate flips SIMULTANEOUSLY and accept the whole move iff the batch hinge
+        improves (else reject all). Unlike cd_pass (per-gate independent accept), this can move
+        through coordinated multi-gate changes -- cross-correlations no single flip would reveal."""
+        gates = (self.def_in[:, 0] >= 0).nonzero(as_tuple=False).flatten()
+        if gates.numel() == 0:
+            return 0
+        cand = gates[torch.randperm(gates.numel(), device=self.device)[:min(n_flip, gates.numel())]]
+        g = cand.shape[0]
+        gr = torch.arange(g, device=self.device)
+        new_p = self.def_p[cand].clone()
+        for _ in range(max(1, n_bits)):                            # flip n_bits bits per gate
+            kb = torch.randint(self.P, (g,), device=self.device)
+            new_p[gr, kb] = ~new_p[gr, kb]
+        yb = y[bidx]
+        cur_out = gather_batch(self.win, cand, bidx)               # (g, Bb)
+        new_out = self.apply_batch(self.def_in[cand], new_p, bidx)
+        delta = new_out - cur_out
+        Lb = self.score[:, bidx].clone()                          # (C, Bb) counts
+        dsc = torch.zeros_like(Lb)
+        dsc.index_add_(0, self.class_of[cand], delta)             # joint per-class score change
+        if self._batch_hinge(Lb + dsc, yb) >= self._batch_hinge(Lb, yb) - 1e-6:
+            return 0                                              # joint move not better -> reject all
+        out = self.apply_full(self.win[self.def_in[cand]], new_p)
+        old = unpack_bits(self.win[cand], self.D).to(torch.float32)
+        nw = unpack_bits(out, self.D).to(torch.float32)
+        self.win[cand] = out
+        self.score.index_add_(0, self.class_of[cand], nw - old)
+        self.def_p[cand] = new_p
+        self.ops.append((cand.clone(), self.def_in[cand].clone(), new_p.clone()))
+        return g
+
     # -- inference ----------------------------------------------------------------------
     @torch.no_grad()
     def evaluate(self, input_bits: torch.Tensor, y: torch.Tensor, batch: int = 8192) -> float:

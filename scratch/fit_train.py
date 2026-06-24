@@ -68,6 +68,11 @@ def main():
     p.add_argument("--build-per-phase", type=int, default=8000)
     p.add_argument("--cd-batch", type=int, default=45000)
     p.add_argument("--cd-flips", type=int, default=2048)
+    p.add_argument("--joint-flips", type=int, default=1000, help="gates per joint exploratory move")
+    p.add_argument("--joint-bits", type=int, default=1, help="bits flipped per gate in a joint move")
+    p.add_argument("--joint-batch", type=int, default=16384, help="batch for joint-move accept test")
+    p.add_argument("--joint-per-report", type=int, default=200,
+                   help="joint moves attempted each report (0 = off, per-gate CD only)")
     p.add_argument("--target-train", type=float, default=95.0)
     p.add_argument("--max-flips", type=int, default=2_000_000_000)
     p.add_argument("--report-flips", type=int, default=4_000_000)
@@ -102,7 +107,8 @@ def main():
           f"train={train_acc(circ, ytr):.2f}  val={fast_eval(circ, build_ops, Xva, vy):.2f}\n",
           flush=True)
 
-    print(f"{'flips':>12} | {'train':>6} | {'val':>6} | {'test':>6} | {'kfl/s':>6} | note", flush=True)
+    print(f"{'flips':>12} | {'train':>6} | {'val':>6} | {'test':>6} | {'kfl/s':>6} | {'jacc':>9} | note",
+          flush=True)
     flips, last_val, hit = 0, 0, False
     while flips < args.max_flips:
         tc = time.time()
@@ -111,6 +117,12 @@ def main():
             nf = min(args.cd_flips, args.report_flips - d2)
             circ.cd_pass(ytr, torch.randint(circ.D, (args.cd_batch,), device=dev), nf)
             d2 += nf
+        jok = jgates = 0                                            # joint exploration bursts
+        for _ in range(args.joint_per_report):
+            a = circ.cd_joint(ytr, torch.randint(circ.D, (args.joint_batch,), device=dev),
+                              args.joint_flips, n_bits=args.joint_bits)
+            if a:
+                jok += 1; jgates += a
         flips += args.report_flips
         tr = train_acc(circ, ytr)
         rate = args.report_flips / (time.time() - tc) / 1000
@@ -122,7 +134,9 @@ def main():
         if tr >= args.target_train and not hit:
             hit = True
             note = f"<-- train target {args.target_train} reached; continuing CD for grokking"
-        print(f"{flips:>12} | {tr:6.2f} | {va:6.2f} | {te:6.2f} | {rate:6.1f} | {note}", flush=True)
+        jstr = f"{jok}/{args.joint_per_report}"
+        print(f"{flips:>12} | {tr:6.2f} | {va:6.2f} | {te:6.2f} | {rate:6.1f} | {jstr:>9} | {note}",
+              flush=True)
     print(f"\nDONE flips={flips} train={train_acc(circ, ytr):.2f}", flush=True)
 
 
