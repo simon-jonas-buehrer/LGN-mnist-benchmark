@@ -134,6 +134,8 @@ class GrownCircuit:
 
         self.class_of = torch.arange(win, device=device) % n_classes   # round-robin grouping
         self.filled = torch.zeros(win, dtype=torch.bool, device=device)
+        self.depth = torch.zeros(win, dtype=torch.long, device=device)  # gates stacked below a slot
+        self.usage = torch.zeros(win, dtype=torch.long, device=device)  # times used as a gate input
         self.def_a = torch.full((win,), -1, dtype=torch.long, device=device)
         self.def_b = torch.full((win,), -1, dtype=torch.long, device=device)
         self.def_tt = torch.zeros((win, 4), dtype=torch.bool, device=device)
@@ -177,54 +179,66 @@ class GrownCircuit:
 
     # -- build --------------------------------------------------------------------------
     def build_sweep(self, y: torch.Tensor, bidx: torch.Tensor, n_build: int,
-                    chunk: int = 8192) -> int:
+                    explore_temp: float = 0.7, depth_pen: float = 0.5,
+                    usage_pen: float = 0.3, max_feats: int = 16384, chunk: int = 8192) -> int:
+        """Fill up to n_build empty slots this sweep. Each empty slot is wired to a 2-input gate
+        over the pool, chosen by correlating pool signals with the slot's residual. Scales to a
+        huge window: we correlate only a capped, sampled feature set against just the slots we
+        fill this sweep, so cost is O(max_feats * n_build * Bb), not O(window^2)."""
         if self.n_gates_built >= self.max_gates:
             return 0
-        n_build = min(n_build, self.max_gates - self.n_gates_built, self.buildable.shape[0])
+        empties = self.buildable[~self.filled[self.buildable]]
+        if empties.numel() == 0:
+            return 0
+        n = min(n_build, empties.numel(), self.max_gates - self.n_gates_built)
+        tgt = empties[torch.randperm(empties.numel(), device=self.device)[:n]]  # slots to fill now
         d, _ = self.class_direction(y, bidx)
 
-        feats = self.filled.nonzero(as_tuple=False).flatten()      # (P,) candidate input slots
+        # candidate input signals: all filled slots, capped by sampling that prefers shallow,
+        # lightly-used slots (Gumbel-top-k over the depth/usage bias). Keeps the matmul bounded.
+        feats = self.filled.nonzero(as_tuple=False).flatten()
+        fbias_all = (-depth_pen * self.depth[feats].to(torch.float32)
+                     - usage_pen * torch.log1p(self.usage[feats].to(torch.float32)))
+        if feats.numel() > max_feats:
+            gsel = -torch.log(-torch.log(torch.rand_like(fbias_all).clamp_min(1e-12)))
+            keep = (fbias_all + gsel).topk(max_feats).indices
+            feats, feat_bias = feats[keep], fbias_all[keep]
+        else:
+            feat_bias = fbias_all
         fb = gather_batch(self.win, feats, bidx)
         fb = fb - fb.mean(1, keepdim=True)
 
-        # build only fills empty slots (each is a fresh boosting vote). Once the window is full,
-        # building stops and the ramp hands everything to CD, which refines the truth tables in
-        # place. Re-wiring filled slots from fresh batches just oscillates, so we don't.
-        tgt = self.buildable[~self.filled[self.buildable]]
-        n_build = min(n_build, tgt.shape[0])
-        if n_build <= 0:
-            return 0
-        db = d[self.class_of[tgt]]                                 # (T, Bb) per-slot direction
-        v = gather_batch(self.win, tgt, bidx)                      # (T, Bb) current slot value
+        # residual per target slot in {-1,0,+1}: fire more where its class should rise but it is
+        # 0, fire less where its class should fall but it is 1.
+        db = d[self.class_of[tgt]]
+        v = gather_batch(self.win, tgt, bidx)
         r = torch.zeros_like(db)
         r[(db > 0) & (v == 0)] = 1.0
         r[(db < 0) & (v == 1)] = -1.0
         rc = r - r.mean(1, keepdim=True)
 
-        t = tgt.shape[0]
-        best_val = torch.zeros((t, 2), device=self.device)        # signed cov of the top-2 feats
-        best_fi = torch.zeros((t, 2), dtype=torch.long, device=self.device)
-        for s in range(0, t, chunk):
-            cov = fb @ rc[s:s + chunk].T                           # (P, |chunk|)  ~ f*N^2 scores
-            cov = cov.masked_fill(feats[:, None] == tgt[s:s + chunk][None, :], 0.0)  # no self-input
-            val, idx = cov.abs().topk(min(2, cov.shape[0]), dim=0)
+        # exploratory top-2 inputs per target: Gumbel-perturbed |cov|, biased toward shallow,
+        # lightly-used slots, so gates spread over the pool instead of reusing the same signals.
+        best_val = torch.zeros((n, 2), device=self.device)
+        best_fi = torch.zeros((n, 2), dtype=torch.long, device=self.device)
+        for s in range(0, n, chunk):
+            cov = fb @ rc[s:s + chunk].T                           # (K, |chunk|) correlation scores
+            self_mask = feats[:, None] == tgt[s:s + chunk][None, :]
+            key = torch.log(cov.abs() + 1e-9) + feat_bias[:, None]
+            if explore_temp > 0:
+                key = key + explore_temp * (
+                    -torch.log(-torch.log(torch.rand_like(key).clamp_min(1e-12))))
+            key = key.masked_fill(self_mask, float("-inf"))        # never use a slot as its own input
+            _, idx = key.topk(min(2, key.shape[0]), dim=0)
             best_fi[s:s + chunk] = idx.T
-            best_val[s:s + chunk] = cov.gather(0, idx).T
+            best_val[s:s + chunk] = cov.gather(0, idx).T           # signed cov sets the NOT polarity
 
-        strength = best_val[:, 0].abs()
-        pick = strength.topk(n_build).indices
-        pick = pick[strength[pick] > 0]
-        if pick.numel() == 0:
-            return 0
-
-        tslots = tgt[pick]
-        a_slot = feats[best_fi[pick, 0]]
-        b_slot = feats[best_fi[pick, 1]]
-        pa = best_val[pick, 0] >= 0                                # NOT the input if corr is negative
-        pb = best_val[pick, 1] >= 0
-        tt = self._init_tt(pa, pb)
-        self._write(tslots, a_slot, b_slot, tt)
-        return tslots.numel()
+        a_slot = feats[best_fi[:, 0]]
+        b_slot = feats[best_fi[:, 1]]
+        pa = best_val[:, 0] >= 0                                   # NOT the input if corr is negative
+        pb = best_val[:, 1] >= 0
+        self._write(tgt, a_slot, b_slot, self._init_tt(pa, pb))
+        return n
 
     def _init_tt(self, pa: torch.Tensor, pb: torch.Tensor) -> torch.Tensor:
         """AND/OR of two optionally-negated inputs as a (k,4) truth table [f00,f01,f10,f11]."""
@@ -251,77 +265,78 @@ class GrownCircuit:
         self.def_b[slots] = b
         self.def_tt[slots] = tt
         self.filled[slots] = True
+        self.depth[slots] = torch.maximum(self.depth[a], self.depth[b]) + 1
+        self.usage.index_add_(0, a, torch.ones_like(a))            # a, b now feed one more gate
+        self.usage.index_add_(0, b, torch.ones_like(b))
         self.ops.append((slots.clone(), a.clone(), b.clone(), tt.clone()))
         self.n_gates_built += slots.numel()
 
-    # -- coordinate descent (vectorized over gates and the 4 flips) ---------------------
-    def cd_pass(self, y: torch.Tensor, bidx: torch.Tensor, sample: int, apply_k: int = 16) -> int:
-        cand = (self.filled & (torch.arange(self.WIN, device=self.device) >= self.N)
-                ).nonzero(as_tuple=False).flatten()
-        if cand.numel() == 0:
+    # -- coordinate descent (randomized: random gate, random bit, flip if it helps) ----
+    def cd_pass(self, y: torch.Tensor, bidx: torch.Tensor, n_flip: int) -> int:
+        """Pick n_flip random gate slots, pick one random truth-table bit on each, and flip the
+        ones that lower the batch hinge loss. No scoring of the other bits, no sorting, no
+        picking the best: just random candidate flips, kept only if they help. This keeps CD
+        exploratory rather than greedily collapsing onto the locally-best move.
+
+        The flips are evaluated against the same pre-pass logits and applied together. They are
+        distinct, randomly chosen slots, so they barely interact (each flip only moves its own
+        class score); the gain estimate per flip is exact in isolation."""
+        gates = (self.filled & (torch.arange(self.WIN, device=self.device) >= self.N)
+                 ).nonzero(as_tuple=False).flatten()
+        if gates.numel() == 0:
             return 0
-        if cand.numel() > sample:
-            cand = cand[torch.randperm(cand.numel(), device=self.device)[:sample]]
+        # sample n_flip distinct gates, and a random bit (0..3) to try on each
+        perm = torch.randperm(gates.numel(), device=self.device)[:min(n_flip, gates.numel())]
+        cand = gates[perm]
+        k_bit = torch.randint(4, (cand.shape[0],), device=self.device)
 
         bb = bidx.shape[0]
         ar = torch.arange(bb, device=self.device)
-        yb = y[bidx]                                                # labels of the batch
+        yb = y[bidx]
         L = self.score[:, bidx] / self.tau                          # (C, Bb)
         sy = L[yb, ar]
         other = L.clone(); other[yb, ar] = -1e9
         m1, am1 = other.max(0)                                       # best competitor + its class
         other2 = other.clone(); other2[am1, ar] = -1e9
         m2 = other2.max(0).values                                   # 2nd best competitor
-        base = torch.clamp(1.0 + m1 - sy, min=0).sum()
 
         g = cand.shape[0]
-        cg = self.class_of[cand]                                    # (G,)
+        gr = torch.arange(g, device=self.device)
+        cg = self.class_of[cand]
         a_bit = gather_batch(self.win, self.def_a[cand], bidx)
         b_bit = gather_batch(self.win, self.def_b[cand], bidx)
         cell = (a_bit.long() * 2 + b_bit.long())                    # (G, Bb) tt entry hit per sample
         cur_tt = self.def_tt[cand]                                  # (G, 4)
-        cur_out = cur_tt.gather(1, cell)                            # (G, Bb)
+        new_tt = cur_tt.clone()
+        new_tt[gr, k_bit] = ~new_tt[gr, k_bit]                       # flip the one random bit
+        cur_out = cur_tt.gather(1, cell).to(torch.float32)          # (G, Bb)
+        new_out = new_tt.gather(1, cell).to(torch.float32)
+        delta = (new_out - cur_out) / self.tau                      # change in this gate's vote
 
-        # the 4 single-bit flips of each gate's truth table -> (G, 4, 4)
-        eye = torch.eye(4, dtype=torch.bool, device=self.device)
-        variants = cur_tt.unsqueeze(1) ^ eye.unsqueeze(0)          # variant k flips bit k
-        out_v = variants.gather(2, cell.unsqueeze(1).expand(g, 4, bb)).to(torch.float32)  # (G,4,Bb)
-        delta = (out_v - cur_out.to(torch.float32).unsqueeze(1)) / self.tau
-
-        is_true = cg[:, None] == yb[None, :]                        # (G, Bb)
+        # exact per-gate hinge delta: a flip only moves its own class score row
+        is_true = cg[:, None] == yb[None, :]
         other_excl = torch.where(cg[:, None] == am1[None, :], m2[None, :], m1[None, :])
-        Lc = L[cg]                                                  # (G, Bb)
-        it = is_true[:, None, :]
-        sy_new = torch.where(it, sy[None, None, :] + delta, sy[None, None, :])
-        bo_new = torch.where(it, m1[None, None, :].expand(g, 4, bb),
-                             torch.maximum(other_excl[:, None, :], Lc[:, None, :] + delta))
-        loss = torch.clamp(1.0 + bo_new - sy_new, min=0).sum(2)    # (G, 4)
-        gain = base - loss
-        best_gain, best_k = gain.max(1)
-        # apply only the top-K flips by gain: the gains are estimated holding the other gates
-        # fixed, so committing thousands at once overshoots (they share class scores). Few at a
-        # time keeps each step close to true coordinate descent.
-        valid = best_gain > 1e-6
-        nvalid = int(valid.sum().item())
-        if nvalid == 0:
+        Lc = L[cg]
+        sy_new = torch.where(is_true, sy[None, :] + delta, sy[None, :])
+        bo_new = torch.where(is_true, m1[None, :].expand(g, bb),
+                             torch.maximum(other_excl, Lc + delta))
+        base = torch.clamp(1.0 + m1 - sy, min=0).sum()
+        loss = torch.clamp(1.0 + bo_new - sy_new, min=0).sum(1)     # (G,)
+        keep = (base - loss) > 1e-6                                  # flip iff it helps
+        if not keep.any():
             return 0
-        k = min(apply_k, nvalid)
-        top = best_gain.masked_fill(~valid, float("-inf")).topk(k).indices
-        sel = cand[top]
-        k_sel = best_k[top]
-        new_tt = self.def_tt[sel].clone()
-        new_tt[torch.arange(sel.shape[0], device=self.device), k_sel] = \
-            ~new_tt[torch.arange(sel.shape[0], device=self.device), k_sel]
-        # apply (batched, exact: each gate only touches its own class score)
-        out = apply_gate(self.win[self.def_a[sel]], self.win[self.def_b[sel]], new_tt)
+
+        sel = cand[keep]
+        sel_tt = new_tt[keep]
+        out = apply_gate(self.win[self.def_a[sel]], self.win[self.def_b[sel]], sel_tt)
         old = unpack_bits(self.win[sel], self.D).to(torch.float32)
         nw = unpack_bits(out, self.D).to(torch.float32)
         self.win[sel] = out
         self.score.index_add_(0, self.class_of[sel], nw - old)
-        self.def_tt[sel] = new_tt
+        self.def_tt[sel] = sel_tt
         self.ops.append((sel.clone(), self.def_a[sel].clone(), self.def_b[sel].clone(),
-                         new_tt.clone()))
-        return k
+                         sel_tt.clone()))
+        return int(keep.sum().item())
 
     # -- inference ----------------------------------------------------------------------
     @torch.no_grad()
@@ -352,10 +367,6 @@ def encode(images: torch.Tensor, enc: Thermometer) -> torch.Tensor:
     return enc(images).flatten(1).t().contiguous().to(torch.uint8)
 
 
-def lerp(a: float, b: float, t: float) -> float:
-    return a + (b - a) * t
-
-
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path, default=Path("data/cifar-10-batches-py"))
@@ -367,18 +378,26 @@ def main() -> None:
     p.add_argument("--num-bits", type=int, default=5, help="thermometer bits per channel (b)")
     p.add_argument("--window-factor", type=float, default=2.0, help="window = f * N slots")
     p.add_argument("--max-gates", type=int, default=200000, help="upper limit on gates built")
+    p.add_argument("--max-feats", type=int, default=16384,
+                   help="cap on pool signals correlated per build sweep (bounds the matmul)")
     p.add_argument("--gate", choices=["and", "or"], default="and", help="initial gate family")
-    p.add_argument("--build-batch", type=int, default=8192)
+    p.add_argument("--explore-temp", type=float, default=0.7,
+                   help="Gumbel temperature for stochastic input selection (0 = strict top-2)")
+    p.add_argument("--depth-penalty", type=float, default=0.5,
+                   help="bias against using deep slots as inputs (keeps circuits shallow)")
+    p.add_argument("--usage-penalty", type=float, default=0.3,
+                   help="bias against reusing already heavily-used slots as inputs")
+    p.add_argument("--build-batch", type=int, default=8192, help="samples per build correlation")
     p.add_argument("--cd-batch", type=int, default=16384, help="samples per CD pass (large = less overfit)")
-    p.add_argument("--cd-sample", type=int, default=4096, help="gate slots scored per CD pass")
-    p.add_argument("--cd-apply", type=int, default=32, help="best flips committed per CD pass")
-    p.add_argument("--rounds", type=int, default=300)
-    p.add_argument("--build-start", type=int, default=1500, help="gates built in round 0")
-    p.add_argument("--build-end", type=int, default=20, help="gates built in the last round")
-    p.add_argument("--cd-start", type=int, default=1, help="CD passes in round 0")
-    p.add_argument("--cd-end", type=int, default=40, help="CD passes in the last round")
-    p.add_argument("--final-cd", type=int, default=500, help="CD passes after the gate budget fills")
-    p.add_argument("--eval-every", type=int, default=10)
+    p.add_argument("--cd-flips", type=int, default=8192,
+                   help="random (gate,bit) flips attempted per CD call; kept only if they help")
+    p.add_argument("--build-per-phase", type=int, default=10000,
+                   help="empty slots filled in each build phase")
+    p.add_argument("--cd-fraction", type=float, default=0.25,
+                   help="CD bitflips per phase as a fraction of all gates built so far")
+    p.add_argument("--extra-cd-phases", type=int, default=30,
+                   help="CD-only phases after the window is full")
+    p.add_argument("--eval-every", type=int, default=3, help="phases between evals")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -413,37 +432,52 @@ def main() -> None:
         return torch.randint(circ.D, (min(n, circ.D),), device=dev)
 
     t0 = time.time()
-    header = "round | gates |  build |   cd  | tr_acc | va_acc | te_acc |  time"
+    header = "  tag |  gates  | build |   cd   | tr_acc | va_acc | te_acc |  time"
     print("\n" + header + "\n" + "-" * len(header), flush=True)
-    print(f"{'base':>5} | {0:6d} | {0:6d} | {0:5d} | {circ.evaluate(Xtr, pool_y):6.2f} | "
-          f"{circ.evaluate(Xva, val_y):6.2f} | {circ.evaluate(Xte, test_y):6.2f} | "
-          f"{time.time() - t0:4.0f}s  (inputs only)", flush=True)
-    for rnd in range(args.rounds):
-        t = rnd / max(1, args.rounds - 1)
-        nb = int(round(lerp(args.build_start, args.build_end, t)))
-        nc = int(round(lerp(args.cd_start, args.cd_end, t)))
-        built = circ.build_sweep(ytr, rbatch(args.build_batch), nb)
-        flips = sum(circ.cd_pass(ytr, rbatch(args.cd_batch), args.cd_sample, args.cd_apply)
-                    for _ in range(nc))
 
-        if rnd % args.eval_every == 0 or rnd == args.rounds - 1:
-            tr = circ.evaluate(Xtr, pool_y)
-            va = circ.evaluate(Xva, val_y)
-            te = circ.evaluate(Xte, test_y)
-            print(f"{rnd:5d} | {circ.n_gates_built:6d} | {built:6d} | {flips:5d} | "
-                  f"{tr:6.2f} | {va:6.2f} | {te:6.2f} | {time.time() - t0:4.0f}s", flush=True)
+    def show(tag: str, built: int, flips: int) -> None:
+        print(f"{tag:>6} | {circ.n_gates_built:7d} | {built:5d} | {flips:6d} | "
+              f"{circ.evaluate(Xtr, pool_y):6.2f} | {circ.evaluate(Xva, val_y):6.2f} | "
+              f"{circ.evaluate(Xte, test_y):6.2f} | {time.time() - t0:4.0f}s", flush=True)
 
-    print(f"\nfinal CD: {args.final_cd} passes", flush=True)
-    for i in range(args.final_cd):
-        circ.cd_pass(ytr, rbatch(args.cd_batch), args.cd_sample, args.cd_apply)
-        if i % max(1, args.final_cd // 10) == 0:
-            print(f"  cd {i:4d} | te_acc {circ.evaluate(Xte, test_y):6.2f} | "
-                  f"{time.time() - t0:4.0f}s", flush=True)
+    show("base", 0, 0)  # inputs only, before any gate
+
+    # Each phase: build a chunk of gates, then run CD bitflips equal to a fraction of all gates
+    # built so far. Build is constant per phase while the gate count grows, so CD automatically
+    # takes over as the window fills (more CD vs build over time). The first build covers every
+    # class (round-robin), so each GroupSum already has gates before the first CD.
+    def cd_phase() -> int:
+        target = int(round(args.cd_fraction * circ.n_gates_built))
+        done = 0
+        while done < target:
+            nf = min(args.cd_flips, target - done)
+            circ.cd_pass(ytr, rbatch(args.cd_batch), nf)
+            done += nf
+        return done
+
+    phase, full_at = 0, None
+    while True:
+        phase += 1
+        built = circ.build_sweep(ytr, rbatch(args.build_batch), args.build_per_phase,
+                                 explore_temp=args.explore_temp, depth_pen=args.depth_penalty,
+                                 usage_pen=args.usage_penalty)
+        flips = cd_phase()
+        window_full = not (~circ.filled[circ.buildable]).any() or circ.n_gates_built >= args.max_gates
+        if window_full and full_at is None:
+            full_at = phase
+        if phase % args.eval_every == 0 or window_full:
+            show(f"p{phase}", built, flips)
+        if full_at is not None and phase >= full_at + args.extra_cd_phases:
+            break
 
     tr, va, te = (circ.evaluate(Xtr, pool_y), circ.evaluate(Xva, val_y),
                   circ.evaluate(Xte, test_y))
+    gd = circ.depth[circ.filled]
     print(f"\nFINAL  gates={circ.n_gates_built}  ops={len(circ.ops)}  "
           f"train={tr:.2f}  val={va:.2f}  test={te:.2f}", flush=True)
+    print(f"depth: mean={gd.float().mean():.2f}  max={int(gd.max())}  "
+          f"usage: mean={circ.usage[circ.filled].float().mean():.2f}  "
+          f"max={int(circ.usage.max())}", flush=True)
 
 
 if __name__ == "__main__":
