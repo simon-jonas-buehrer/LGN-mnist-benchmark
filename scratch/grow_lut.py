@@ -293,32 +293,27 @@ class GrownCircuit:
         fb = gather_batch(self.win, feats, bidx)
         fb = fb - fb.mean(1, keepdim=True)
 
-        # residual per target slot in {-1,0,+1}
-        db = d[self.class_of[tgt]]
-        v = gather_batch(self.win, tgt, bidx)
-        r = torch.zeros_like(db)
-        r[(db > 0) & (v == 0)] = 1.0
-        r[(db < 0) & (v == 1)] = -1.0
-        rc = r - r.mean(1, keepdim=True)
-
-        # top-K inputs per target by covariance over the sampled candidate set
+        # Process the targets in chunks: residual -> covariance -> top-K -> write, per chunk. This
+        # bounds memory (the per-chunk _write unpacks only (chunk, D)), so build_per_phase can be
+        # huge without OOM.
         kk = min(self.K, feats.numel())
-        best_val = torch.zeros((n, kk), device=self.device)        # signed cov of the K inputs
-        best_fi = torch.zeros((n, kk), dtype=torch.long, device=self.device)
         for s in range(0, n, chunk):
-            cov = fb @ rc[s:s + chunk].T                           # (feats, |chunk|)
-            self_mask = feats[:, None] == tgt[s:s + chunk][None, :]
-            key = cov.abs().masked_fill(self_mask, -1.0)           # never use a slot as its own input
-            _, idx = key.topk(kk, dim=0)                           # (kk, |chunk|)
-            best_fi[s:s + chunk] = idx.T
-            best_val[s:s + chunk] = cov.gather(0, idx).T           # signed cov -> NOT polarity
-
-        ins = feats[best_fi]                                       # (n, kk)
-        pol = best_val >= 0                                        # which inputs are used un-negated
-        if kk < self.K:                                            # tiny pool: pad by repeating col 0
-            ins = torch.cat([ins, ins[:, :1].expand(n, self.K - kk)], dim=1)
-            pol = torch.cat([pol, pol[:, :1].expand(n, self.K - kk)], dim=1)
-        self._write(tgt, ins, self._init_params(pol))
+            tc = tgt[s:s + chunk]
+            db = d[self.class_of[tc]]
+            v = gather_batch(self.win, tc, bidx)
+            r = torch.zeros_like(db)
+            r[(db > 0) & (v == 0)] = 1.0
+            r[(db < 0) & (v == 1)] = -1.0
+            rc = r - r.mean(1, keepdim=True)
+            cov = fb @ rc.T                                        # (feats, |chunk|)
+            cov = cov.masked_fill(feats[:, None] == tc[None, :], 0.0)   # never use a slot as own input
+            _, idx = cov.abs().topk(kk, dim=0)                     # (kk, |chunk|)
+            ins = feats[idx.T]                                     # (|chunk|, kk)
+            pol = cov.gather(0, idx).T >= 0
+            if kk < self.K:                                        # tiny pool: pad
+                ins = torch.cat([ins, ins[:, :1].expand(ins.shape[0], self.K - kk)], dim=1)
+                pol = torch.cat([pol, pol[:, :1].expand(pol.shape[0], self.K - kk)], dim=1)
+            self._write(tc, ins, self._init_params(pol))
         return n
 
     def _init_params(self, pol: torch.Tensor) -> torch.Tensor:
