@@ -526,10 +526,18 @@ def main() -> None:
     header = "  tag |  gates  | build |   cd   | tr_acc | va_acc | te_acc |  time"
     print("\n" + header + "\n" + "-" * len(header), flush=True)
 
-    def show(tag: str, built: int, flips: int) -> None:
+    best = {"va": -1.0, "te": -1.0, "phase": 0, "gates": 0}
+
+    def show(tag: str, built: int, flips: int) -> tuple[float, float, float]:
+        tr = circ.evaluate(Xtr, pool_y)
+        va = circ.evaluate(Xva, val_y)
+        te = circ.evaluate(Xte, test_y)
         print(f"{tag:>6} | {circ.n_gates_built:7d} | {built:5d} | {flips:6d} | "
-              f"{circ.evaluate(Xtr, pool_y):6.2f} | {circ.evaluate(Xva, val_y):6.2f} | "
-              f"{circ.evaluate(Xte, test_y):6.2f} | {time.time() - t0:4.0f}s", flush=True)
+              f"{tr:6.2f} | {va:6.2f} | {te:6.2f} | {time.time() - t0:4.0f}s", flush=True)
+        if va > best["va"]:
+            best.update(va=va, te=te, phase=int(tag[1:]) if tag[1:].isdigit() else 0,
+                        gates=circ.n_gates_built)
+        return tr, va, te
 
     show("base", 0, 0)  # inputs only, before any gate
     snaps: list[dict] = []
@@ -581,6 +589,8 @@ def main() -> None:
     print(f"depth: mean={gd.float().mean():.2f}  max={int(gd.max())}  "
           f"usage: mean={circ.usage[circ.filled].float().mean():.2f}  "
           f"max={int(circ.usage.max())}", flush=True)
+    print(f"BEST  val={best['va']:.2f}  test={best['te']:.2f}  "
+          f"at phase {best['phase']}  gates={best['gates']}", flush=True)
 
     if args.viz and snaps:
         args.viz_out.parent.mkdir(parents=True, exist_ok=True)
