@@ -1,0 +1,14 @@
+srun: Clearing requested partition. It is selected automatically based on your Slurm account membership.
+srun: Setting partitions to : cpu.normal,disco.med,gpu.normal
+############ K4 d2 ############
+   p40 |   80000 |  2000 |  60000 |  16.11 |  15.64 |  16.42 |   38s
+   p50 |  100000 |  2000 |  60000 |  15.90 |  14.96 |  15.53 |   51s
+   p60 |  120000 |  2000 |  60000 |  15.02 |  14.44 |  13.98 |   66s
+   p70 |  140000 |  2000 |  60000 |  14.61 |  13.38 |  14.69 |   81s
+FINAL  gates=150000  ops=2325  train=14.70  val=13.50  test=14.56
+BEST  val=20.52  test=20.87  at p20  gates=40000
+############ K32 d2 ############
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd: error: *** STEP 2090956.0 ON tikgpu09 CANCELLED AT 2026-06-24T13:53:31 ***
+srun: error: tikgpu09: task 0: Terminated
+srun: Terminating StepId=2090956.0

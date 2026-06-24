@@ -134,16 +134,32 @@ def apply_gate(ins: torch.Tensor, tt: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def apply_conj(ins: torch.Tensor, act: torch.Tensor, pol: torch.Tensor) -> torch.Tensor:
+    """Packed K-input conjunction. ins: (n, K, W) int64; act, pol: (n, K) bool (input active? and
+    its polarity). Returns (n, W) = AND over active inputs of (input if pol else ~input). With the
+    AND structure shared, only 2K weight bits per gate -- linear in K instead of 2**K."""
+    n, k, w = ins.shape
+    out = ins.new_full((n, w), -1)                                 # all-ones (constant 1 if none active)
+    for i in range(k):
+        lit = torch.where(pol[:, i:i + 1], ins[:, i], ~ins[:, i])
+        out = torch.where(act[:, i:i + 1], out & lit, out)
+    return out
+
+
 # ======================================================================================
 # The grown circuit
 # ======================================================================================
 class GrownCircuit:
     def __init__(self, n_inputs: int, n_classes: int, window_factor: float,
-                 *, fan_in: int, max_gates: int, device: str):
+                 *, fan_in: int, gate_type: str, max_gates: int, device: str):
         self.N = n_inputs
         self.C = n_classes
         self.K = fan_in
+        self.gate_type = gate_type                                 # "lut" or "conj"
         self.TT = 1 << fan_in                                      # truth-table length 2**K
+        # Per-gate parameter bits: a full LUT is 2**K; a conjunction shares the AND structure and
+        # stores 2K bits (per input: active? and polarity), so it scales O(K), not 2**K.
+        self.P = self.TT if gate_type == "lut" else 2 * fan_in
         win = int(round(window_factor * n_inputs))
         win -= win % n_classes                                     # clean multiple of C
         self.WIN = win
@@ -151,7 +167,7 @@ class GrownCircuit:
         self.tau = math.sqrt(self.H)
         self.max_gates = max_gates
         self.device = device
-        self.pw = (1 << torch.arange(fan_in, device=device)).long()   # 2**i, for cell indexing
+        self.pw = (1 << torch.arange(fan_in, device=device)).long()   # 2**i, for LUT cell indexing
 
         # The window is WIN = f*N slots, the whole head. It starts as f tiled copies of the N
         # encoding bits; every slot is buildable, building replaces a slot (an input copy or a
@@ -160,7 +176,7 @@ class GrownCircuit:
         self.depth = torch.zeros(win, dtype=torch.long, device=device)
         self.usage = torch.zeros(win, dtype=torch.long, device=device)
         self.def_in = torch.full((win, fan_in), -1, dtype=torch.long, device=device)  # -1 = copy
-        self.def_tt = torch.zeros((win, self.TT), dtype=torch.bool, device=device)
+        self.def_p = torch.zeros((win, self.P), dtype=torch.bool, device=device)   # gate params
         self.buildable = torch.arange(win, device=device)
 
         self.ops: list[tuple] = []                   # ordered op-batches (slots, ins, tt)
@@ -222,6 +238,25 @@ class GrownCircuit:
         d[yb, ar] = torch.where(safe, 0.0, 1.0)          # true class: push up unless safe
         return d, logit
 
+    # -- gate dispatch (lut truth table vs conj shared-AND weights) ----------------------
+    def apply_full(self, ins_words: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
+        """Gate output over all D: ins_words (n, K, W), params (n, P) -> (n, W)."""
+        if self.gate_type == "lut":
+            return apply_gate(ins_words, params)
+        return apply_conj(ins_words, params[:, :self.K], params[:, self.K:])
+
+    def apply_batch(self, ins_slots: torch.Tensor, params: torch.Tensor,
+                    bidx: torch.Tensor) -> torch.Tensor:
+        """Gate output on a batch: ins_slots (G, K) signal indices, params (G, P) -> (G, Bb)."""
+        g, k = ins_slots.shape
+        bits = gather_batch(self.win, ins_slots.reshape(-1), bidx).view(g, k, -1)   # (G,K,Bb)
+        if self.gate_type == "lut":
+            cell = (bits.long() * self.pw.view(1, k, 1)).sum(1)    # (G, Bb)
+            return params.gather(1, cell).to(torch.float32)
+        act, pol = params[:, :k, None], params[:, k:, None]
+        lit = torch.where(pol, bits, 1.0 - bits)
+        return torch.where(act, lit, torch.ones_like(bits)).prod(1)   # AND of active literals
+
     # -- build --------------------------------------------------------------------------
     def build_sweep(self, y: torch.Tensor, bidx: torch.Tensor, n_build: int,
                     depth_pen: float = 2.0, usage_pen: float = 0.3, max_feats: int = 16384,
@@ -269,37 +304,34 @@ class GrownCircuit:
         if kk < self.K:                                            # tiny pool: pad by repeating col 0
             ins = torch.cat([ins, ins[:, :1].expand(n, self.K - kk)], dim=1)
             pol = torch.cat([pol, pol[:, :1].expand(n, self.K - kk)], dim=1)
-        self._write(tgt, ins, self._init_tt(pol))
+        self._write(tgt, ins, self._init_params(pol))
         return n
 
-    def _init_tt(self, pol: torch.Tensor) -> torch.Tensor:
-        """AND of K optionally-negated inputs as a (n, 2**K) one-hot truth table: fire only on the
-        single cell where every input matches its wanted polarity."""
-        cell = (pol.long() * self.pw).sum(1)                       # (n,)
-        tt = torch.zeros((pol.shape[0], self.TT), dtype=torch.bool, device=self.device)
-        tt[torch.arange(pol.shape[0], device=self.device), cell] = True
-        return tt
+    def _init_params(self, pol: torch.Tensor) -> torch.Tensor:
+        """Seed gate = AND of the K inputs at their wanted polarity. lut: one-hot truth table at
+        that cell. conj: all inputs active, polarity from pol."""
+        n = pol.shape[0]
+        if self.gate_type == "lut":
+            cell = (pol.long() * self.pw).sum(1)                   # (n,)
+            p = torch.zeros((n, self.P), dtype=torch.bool, device=self.device)
+            p[torch.arange(n, device=self.device), cell] = True
+            return p
+        return torch.cat([torch.ones((n, self.K), dtype=torch.bool, device=self.device), pol], dim=1)
 
-    def _write(self, slots: torch.Tensor, ins: torch.Tensor, tt: torch.Tensor) -> None:
+    def _write(self, slots: torch.Tensor, ins: torch.Tensor, params: torch.Tensor) -> None:
         """Write K-input gate outputs into the slots; update scores, definitions and op history."""
-        out = apply_gate(self.win[ins], tt)                        # (n, Wwords)
+        out = self.apply_full(self.win[ins], params)               # (n, Wwords)
         old = unpack_bits(self.win[slots], self.D).to(torch.float32)
         new = unpack_bits(out, self.D).to(torch.float32)
         self.win[slots] = out
         self.score.index_add_(0, self.class_of[slots], new - old)
         self.def_in[slots] = ins
-        self.def_tt[slots] = tt
+        self.def_p[slots] = params
         self.depth[slots] = self.depth[ins].max(1).values + 1
         self.usage.index_add_(0, ins.reshape(-1), torch.ones(ins.numel(), dtype=torch.long,
                                                               device=self.device))
-        self.ops.append((slots.clone(), ins.clone(), tt.clone()))
+        self.ops.append((slots.clone(), ins.clone(), params.clone()))
         self.n_gates_built += slots.numel()
-
-    def _cells(self, ins: torch.Tensor, bidx: torch.Tensor) -> torch.Tensor:
-        """Truth-table cell each sample hits for the given gates: (G, Bb) in 0..2**K-1."""
-        g, k = ins.shape
-        bits = gather_batch(self.win, ins.reshape(-1), bidx).long().view(g, k, -1)  # (G,K,Bb)
-        return (bits * self.pw.view(1, k, 1)).sum(1)               # (G, Bb)
 
     # -- coordinate descent (randomized: random gate, random bit, flip if it helps) ----
     def cd_pass(self, y: torch.Tensor, bidx: torch.Tensor, n_flip: int) -> int:
@@ -308,7 +340,7 @@ class GrownCircuit:
             return 0
         perm = torch.randperm(gates.numel(), device=self.device)[:min(n_flip, gates.numel())]
         cand = gates[perm]
-        k_bit = torch.randint(self.TT, (cand.shape[0],), device=self.device)  # random cell to flip
+        k_bit = torch.randint(self.P, (cand.shape[0],), device=self.device)  # random param bit to flip
 
         bb = bidx.shape[0]
         ar = torch.arange(bb, device=self.device)
@@ -323,12 +355,10 @@ class GrownCircuit:
         g = cand.shape[0]
         gr = torch.arange(g, device=self.device)
         cg = self.class_of[cand]
-        cell = self._cells(self.def_in[cand], bidx)                # (G, Bb)
-        cur_tt = self.def_tt[cand]                                 # (G, 2**K)
-        new_tt = cur_tt.clone()
-        new_tt[gr, k_bit] = ~new_tt[gr, k_bit]
-        cur_out = cur_tt.gather(1, cell).to(torch.float32)
-        new_out = new_tt.gather(1, cell).to(torch.float32)
+        cur_out = gather_batch(self.win, cand, bidx)               # (G, Bb) current gate output
+        new_p = self.def_p[cand].clone()
+        new_p[gr, k_bit] = ~new_p[gr, k_bit]                       # flip one param bit
+        new_out = self.apply_batch(self.def_in[cand], new_p, bidx)  # gate output with the flip
         delta = (new_out - cur_out) / self.tau
 
         is_true = cg[:, None] == yb[None, :]
@@ -344,14 +374,14 @@ class GrownCircuit:
             return 0
 
         sel = cand[keep]
-        sel_tt = new_tt[keep]
-        out = apply_gate(self.win[self.def_in[sel]], sel_tt)
+        sel_p = new_p[keep]
+        out = self.apply_full(self.win[self.def_in[sel]], sel_p)
         old = unpack_bits(self.win[sel], self.D).to(torch.float32)
         nw = unpack_bits(out, self.D).to(torch.float32)
         self.win[sel] = out
         self.score.index_add_(0, self.class_of[sel], nw - old)
-        self.def_tt[sel] = sel_tt
-        self.ops.append((sel.clone(), self.def_in[sel].clone(), sel_tt.clone()))
+        self.def_p[sel] = sel_p
+        self.ops.append((sel.clone(), self.def_in[sel].clone(), sel_p.clone()))
         return int(keep.sum().item())
 
     # -- inference ----------------------------------------------------------------------
@@ -363,8 +393,8 @@ class GrownCircuit:
         for i in range(0, d, batch):
             xb = input_bits[:, i:i + batch].to(self.device)
             win = pack_bits(xb)[self.tile].contiguous()            # f tiled copies of the encoding
-            for slots, ins, tt in self.ops:                        # each batch reads earlier state
-                win[slots] = apply_gate(win[ins], tt)
+            for slots, ins, params in self.ops:                    # each batch reads earlier state
+                win[slots] = self.apply_full(win[ins], params)
             score = torch.zeros((self.C, xb.shape[1]), device=self.device)
             for s0 in range(0, self.WIN, 8192):
                 sl = slice(s0, min(s0 + 8192, self.WIN))
@@ -380,8 +410,8 @@ class GrownCircuit:
         """Window depth map, the truth-table popcount histogram (how specific the gates are), and
         the depth distribution."""
         gate = self.def_in[:, 0] >= 0                              # built gates (not raw copies)
-        pop = self.def_tt[gate].sum(1)                             # cells each gate fires on
-        ttpop = torch.bincount(pop, minlength=self.TT + 1).cpu().numpy()
+        pop = self.def_p[gate].sum(1)                              # param bits set per gate
+        ttpop = torch.bincount(pop, minlength=min(self.P, 64) + 1).cpu().numpy()
         dcounts = torch.bincount(self.depth, minlength=10).cpu().numpy()
         cols = int(math.ceil(self.WIN ** 0.5))
         rows = int(math.ceil(self.WIN / cols))
@@ -423,8 +453,8 @@ def render_animation(snaps: list[dict], out_path: Path) -> None:
         a_img.set_xticks([]); a_img.set_yticks([])
 
         a_fn.bar(range(len(s["ttpop"])), s["ttpop"], color="tab:blue")
-        a_fn.set_title("gate specificity  (truth-table popcount)")
-        a_fn.set_xlabel("# input combos the gate fires on"); a_fn.set_ylabel("gates")
+        a_fn.set_title("gate parameter bits set  (the LUT weights)")
+        a_fn.set_xlabel("# param bits set per gate"); a_fn.set_ylabel("gates")
 
         dd = s["depth"]
         a_dep.bar(range(len(dd)), dd, color="tab:green")
@@ -465,7 +495,9 @@ def main() -> None:
     # N = 3*32*32*b = 3072*b; WIN = f*N must divide by C=10, so b*f must be a multiple of 5.
     p.add_argument("--num-bits", type=int, default=5, help="thermometer bits per channel (b)")
     p.add_argument("--window-factor", type=float, default=8.0, help="window = f * N slots")
-    p.add_argument("--fan-in", type=int, default=4, help="inputs per gate K (truth table is 2**K)")
+    p.add_argument("--fan-in", type=int, default=4, help="inputs per gate K")
+    p.add_argument("--gate-type", choices=["lut", "conj"], default="lut",
+                   help="lut: full 2**K truth table. conj: shared-AND, 2K weights (scales O(K))")
     p.add_argument("--max-gates", type=int, default=400000, help="upper limit on gates built")
     p.add_argument("--max-feats", type=int, default=16384,
                    help="cap on pool signals correlated per build sweep (bounds the matmul)")
@@ -513,11 +545,11 @@ def main() -> None:
     ytr = pool_y.to(dev)
 
     circ = GrownCircuit(n_inputs, 10, args.window_factor, fan_in=args.fan_in,
-                        max_gates=args.max_gates, device=dev)
+                        gate_type=args.gate_type, max_gates=args.max_gates, device=dev)
     circ.set_inputs(Xtr)
     exact = (n_inputs * args.window_factor) % 10 == 0
-    print(f"N={n_inputs}  WIN=f*N={circ.WIN}  H={circ.H}  K={circ.K}  2^K={circ.TT}  "
-          f"tau={circ.tau:.1f}  exact={exact}", flush=True)
+    print(f"N={n_inputs}  WIN=f*N={circ.WIN}  H={circ.H}  K={circ.K}  gate={circ.gate_type}  "
+          f"P(bits/gate)={circ.P}  tau={circ.tau:.1f}  exact={exact}", flush=True)
 
     def rbatch(n: int) -> torch.Tensor:
         return torch.randint(circ.D, (min(n, circ.D),), device=dev)
