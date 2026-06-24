@@ -79,6 +79,7 @@ def main():
     p.add_argument("--cd-batches", type=int, nargs="+", default=[2048, 8192, 32768, 45000])
     p.add_argument("--aug-flip", action="store_true", help="add horizontal-flip copies of train")
     p.add_argument("--aug-crops", type=int, default=0, help="add this many random-crop copies")
+    p.add_argument("--max-train", type=int, default=0, help="subsample (augmented) train to this size")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -90,6 +91,9 @@ def main():
     vx, vy, px, py = tx[-nv:], ty[-nv:], tx[:-nv], ty[:-nv]
     if args.aug_flip or args.aug_crops:
         px, py = augment(px, py, flip=args.aug_flip, crops=args.aug_crops)
+        if args.max_train and len(px) > args.max_train:           # cap to bound memory
+            sel = torch.randperm(len(px))[:args.max_train]
+            px, py = px[sel], py[sel]
         print(f"augmented train -> {len(px)} images (flip={args.aug_flip} crops={args.aug_crops})",
               flush=True)
     enc = Thermometer(num_bits=args.num_bits).fit(px[:2000])
