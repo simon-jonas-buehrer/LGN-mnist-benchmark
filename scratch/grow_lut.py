@@ -519,6 +519,9 @@ def main() -> None:
     p.add_argument("--terms", type=int, default=1,
                    help="conj only: DNF terms per gate (each terms*2K bits); 1 = single conjunction")
     p.add_argument("--max-gates", type=int, default=400000, help="upper limit on gates built")
+    p.add_argument("--phases", type=int, default=0,
+                   help="if >0, run exactly this many phases and ramp the schedule by phase "
+                        "progress (lets build ramp to 0 while CD keeps going); else stop at max-gates")
     p.add_argument("--max-feats", type=int, default=16384,
                    help="cap on pool signals correlated per build sweep (bounds the matmul)")
     p.add_argument("--depth-penalty", type=float, default=2.0,
@@ -618,9 +621,12 @@ def main() -> None:
         return int(round(a + (b - a) * t))
 
     phase = 0
-    while circ.n_gates_built < args.max_gates:
+    while True:
         phase += 1
-        t = circ.n_gates_built / max(1, args.max_gates)            # progress 0..1
+        if args.phases > 0:                                        # phase-based ramp
+            t = (phase - 1) / max(1, args.phases - 1)
+        else:                                                      # gate-progress ramp
+            t = circ.n_gates_built / max(1, args.max_gates)
         built = circ.build_sweep(ytr, rbatch(args.build_batch), lerp(args.build_start, args.build_end, t),
                                  depth_pen=args.depth_penalty, usage_pen=args.usage_penalty,
                                  max_feats=args.max_feats)
@@ -628,6 +634,11 @@ def main() -> None:
         if phase % args.eval_every == 0:
             show(f"p{phase}", built, flips)
         record(phase)
+        if args.phases > 0:
+            if phase >= args.phases:
+                break
+        elif circ.n_gates_built >= args.max_gates:
+            break
 
     # Build budget spent: stop growing, run a long CD-only anneal (watch for a second peak).
     if args.final_cd_flips > 0:
