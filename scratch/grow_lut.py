@@ -438,10 +438,15 @@ def render_animation(snaps: list[dict], out_path: Path) -> None:
         a_acc.set_title(f"accuracy   phase {s['phase']}   test={s['te']:.1f}%")
         a_acc.set_xlabel("phase"); a_acc.set_ylabel("accuracy (%)")
         a_acc.legend(loc="lower right"); a_acc.grid(alpha=0.3)
-        a_g.plot(phases[:j], [t["n_built"] for t in snaps[:j]], color="tab:red", ls="--", lw=1)
-        a_g.set_ylim(0, max(1, max(t["n_built"] for t in snaps)))
-        a_g.set_ylabel("total gates built", color="tab:red")
-        a_g.tick_params(axis="y", labelcolor="tab:red")
+        # second y-axis (log): the two schedules -- cumulative gates built and cumulative flips
+        a_g.plot(phases[:j], [max(1, t["n_built"]) for t in snaps[:j]], color="tab:red",
+                 ls="--", lw=1, label="gates built")
+        a_g.plot(phases[:j], [max(1, t.get("n_flipped", 0)) for t in snaps[:j]], color="tab:purple",
+                 ls=":", lw=1, label="bitflips")
+        a_g.set_yscale("log")
+        a_g.set_ylim(1, max(10, max(max(t["n_built"], t.get("n_flipped", 0)) for t in snaps)))
+        a_g.set_ylabel("cumulative (log): gates built / bitflips")
+        a_g.legend(loc="upper left", fontsize=7)
         fig.suptitle("backprop-free LUT network: greedy build + coordinate descent", fontsize=13)
         fig.tight_layout(rect=(0, 0, 1, 0.97))
         return []
@@ -473,9 +478,12 @@ def main() -> None:
     p.add_argument("--cd-batch", type=int, default=8192, help="samples per CD pass")
     p.add_argument("--cd-flips", type=int, default=1024,
                    help="random (gate,bit) flips attempted per CD call; kept only if they help")
-    p.add_argument("--build-per-phase", type=int, default=2000, help="slots (re)built each phase")
-    p.add_argument("--cd-fraction", type=float, default=0.5,
-                   help="CD bitflips per phase as a fraction of the WIN gate slots")
+    # Per-phase schedule: gates (re)built and CD bitflips both ramp linearly with progress
+    # (n_gates_built / max_gates), so you can build-heavy early and flip-heavy late.
+    p.add_argument("--build-start", type=int, default=2000, help="slots (re)built in the first phase")
+    p.add_argument("--build-end", type=int, default=2000, help="slots (re)built in the last phase")
+    p.add_argument("--cd-start", type=int, default=60000, help="CD bitflips in the first phase")
+    p.add_argument("--cd-end", type=int, default=60000, help="CD bitflips in the last phase")
     p.add_argument("--final-cd-flips", type=int, default=0,
                    help="long CD-only annealing after the gate budget: total random bitflips")
     p.add_argument("--eval-every", type=int, default=10, help="phases between evals")
@@ -533,35 +541,42 @@ def main() -> None:
     show("base", 0, 0)  # tiled inputs, before any gate
     snaps: list[dict] = []
 
+    flips_total = [0]  # cumulative CD bitflips attempted (the CD schedule, for the plot)
+
     def record(phase: int) -> None:
         if not args.viz or phase % args.viz_every != 0:
             return
         s = circ.snapshot()
-        s.update(phase=phase, n_built=circ.n_gates_built,
+        s.update(phase=phase, n_built=circ.n_gates_built, n_flipped=flips_total[0],
                  tr=circ.evaluate(Xtr, pool_y), va=circ.evaluate(Xva, val_y),
                  te=circ.evaluate(Xte, test_y))
         snaps.append(s)
 
-    def cd_phase() -> int:
-        target = int(round(args.cd_fraction * circ.WIN))
+    def cd_phase(target: int) -> int:
         done = 0
         while done < target:
             nf = min(args.cd_flips, target - done)
             circ.cd_pass(ytr, rbatch(args.cd_batch), nf)
             done += nf
+        flips_total[0] += done
         return done
+
+    def lerp(a: int, b: int, t: float) -> int:
+        return int(round(a + (b - a) * t))
 
     phase = 0
     while circ.n_gates_built < args.max_gates:
         phase += 1
-        built = circ.build_sweep(ytr, rbatch(args.build_batch), args.build_per_phase,
+        t = circ.n_gates_built / max(1, args.max_gates)            # progress 0..1
+        built = circ.build_sweep(ytr, rbatch(args.build_batch), lerp(args.build_start, args.build_end, t),
                                  depth_pen=args.depth_penalty, usage_pen=args.usage_penalty,
                                  max_feats=args.max_feats)
-        flips = cd_phase()
+        flips = cd_phase(lerp(args.cd_start, args.cd_end, t))
         if phase % args.eval_every == 0:
             show(f"p{phase}", built, flips)
         record(phase)
 
+    # Build budget spent: stop growing, run a long CD-only anneal (watch for a second peak).
     if args.final_cd_flips > 0:
         print(f"final CD annealing: {args.final_cd_flips} flips", flush=True)
         done, k = 0, 0
@@ -569,9 +584,12 @@ def main() -> None:
             nf = min(args.cd_flips, args.final_cd_flips - done)
             circ.cd_pass(ytr, rbatch(args.cd_batch), nf)
             done += nf
+            flips_total[0] += nf
             k += 1
             if k % 100 == 0:
+                phase += 1
                 show(f"c{done // 1000}k", 0, nf)
+                record(phase)
 
     tr, va, te = (circ.evaluate(Xtr, pool_y), circ.evaluate(Xva, val_y),
                   circ.evaluate(Xte, test_y))
