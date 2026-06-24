@@ -32,6 +32,26 @@ def encode(images, enc):
     return enc(images).flatten(1).t().contiguous().to(torch.uint8)
 
 
+def augment(x, y, *, flip=True, crops=0, pad=4):
+    """Expand the train set with augmented copies (original + h-flip + random crops). Returns the
+    concatenated images and matching labels."""
+    import torch.nn.functional as F
+    parts = [(x, y)]
+    if flip:
+        parts.append((x.flip(-1), y))
+    if crops > 0:
+        xp = F.pad(x, (pad, pad, pad, pad), mode="reflect")        # (N,3,32+2p,32+2p)
+        nn_, cc = torch.arange(x.shape[0]).view(-1, 1, 1, 1), torch.arange(3).view(1, 3, 1, 1)
+        ar = torch.arange(32)
+        for _ in range(crops):
+            i = torch.randint(0, 2 * pad + 1, (x.shape[0], 1, 1, 1))
+            j = torch.randint(0, 2 * pad + 1, (x.shape[0], 1, 1, 1))
+            ri = i + ar.view(1, 1, 32, 1)
+            cj = j + ar.view(1, 1, 1, 32)
+            parts.append((xp[nn_, cc, ri, cj], y))
+    return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
+
+
 def snapshot_state(c):
     return (c.win.clone(), c.score.clone(), c.def_in.clone(), c.def_p.clone(),
             c.depth.clone(), c.usage.clone(), list(c.ops), c.n_gates_built)
@@ -57,6 +77,8 @@ def main():
     p.add_argument("--cd-total", type=int, default=3000000, help="total flips attempted per config")
     p.add_argument("--report-every", type=int, default=300000)
     p.add_argument("--cd-batches", type=int, nargs="+", default=[2048, 8192, 32768, 45000])
+    p.add_argument("--aug-flip", action="store_true", help="add horizontal-flip copies of train")
+    p.add_argument("--aug-crops", type=int, default=0, help="add this many random-crop copies")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -66,6 +88,10 @@ def main():
     tx, ty, ex, ey = load_cifar10(args.data_dir, False)
     nv = round(len(tx) * 0.1)
     vx, vy, px, py = tx[-nv:], ty[-nv:], tx[:-nv], ty[:-nv]
+    if args.aug_flip or args.aug_crops:
+        px, py = augment(px, py, flip=args.aug_flip, crops=args.aug_crops)
+        print(f"augmented train -> {len(px)} images (flip={args.aug_flip} crops={args.aug_crops})",
+              flush=True)
     enc = Thermometer(num_bits=args.num_bits).fit(px[:2000])
     Xtr, Xva = encode(px, enc), encode(vx, enc)
     n = Xtr.shape[0]
