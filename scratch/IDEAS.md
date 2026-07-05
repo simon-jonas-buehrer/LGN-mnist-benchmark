@@ -63,6 +63,21 @@ table; structure (threshold/hash regimes) must be EARNED by CD, never imposed at
 hg2 (running): hash init at M=64 with K=6/12/16, K=12 M=256, lut K=8 — does a bigger tap
 budget with constant table size pay? reg1 (running): spatial pyramid 32,32,16,16,8,8; cutout
 queued for backfill.
+
+Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
+- ✅ **cd-cf compounds on the live recipe**: hg1_ctrl val 50.48 @ r12 — beats wave-2's 50.1
+  (r14) with the same everything else. Hash-weight moves are a keeper lever.
+- ✅ **POOLING PYRAMID WON** (reg1_pyr, --spatial 32,32,16,16,8,8): val 48.92 @ r8 in 33 min
+  vs flat ctrl 49.4 @ r8 in 85 min — ~equal val at 2.6x less wall-clock, HALF the overfit
+  gap (11 vs 20). New fast-iteration geometry; gen2 probes its wall (r30) + 2x width.
+- ❌ **lut K=8 (M=256) REFUTED**: train 83.7 / val 43.8 @ r3, gap 40, val decelerating —
+  bigger LUT tables memorize. TABLE CAPACITY is the overfit knob; tap count is the reach
+  knob. Killed at r3. Reinforces small-M + learned-weights direction.
+- 🔬 hash init (K6 M64): val 45.5 @ r6, ~3 pts behind lut init but gap 9.5 vs 21 and still
+  climbing +1/round late — the regularized-capacity signature. K12/K16: slower starts,
+  costlier rounds (16/27 min) — K16 likely too slow to justify unless its curve crosses.
+- 🔬 fanout-cap 6 (gen1_fo6): r3 ≈ ctrl exactly (46.4/19.2 gap vs 47.1/19.1) — cap only
+  blocks NEW concentration, effect (if any) should appear late as hot signals decay.
 Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
 of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
 symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —
