@@ -1,0 +1,249 @@
+# Idea ledger — backprop-free LUT-net optimization toward >80% val CIFAR-10
+
+The optimizer is a **mixture of RL + evolution strategies over a discrete/binary network**,
+learning connections, gate truth tables, AND architecture (sharing, strides, polarity,
+capacity). No backprop, no gradients — every accept is exact on the full train set (or its
+verified cascade with depth). This file is the running record of every idea tried or queued,
+by research domain, so nothing lives only in chat.
+
+Status key: ✅ SHIPPED (won its test, in code & default) · ❌ REFUTED (A/B'd, deleted from
+code) · 🔬 QUEUED (designed, not yet run) · 💡 SPECULATIVE (idea, not yet designed).
+
+Reference ceiling: conv-difflogic (Petersen et al., NeurIPS 2024, arxiv 2411.04732) reaches
+86.29% CIFAR-10 with logic gates via SGD — proves the model class can exceed 80. Our job is
+to get there with discrete zeroth-order search. Plain deep difflogic (2022) ≈ 62% = the "the
+architecture works" bar.
+
+---
+
+## Multiresolution / coarse-to-fine (THE REFACTOR, 2026-07-05) — generalize everything
+
+### v2 REFRAME (same day, supersedes the framing below where they differ): ONE SUBSTRATE,
+### ONE PROTOCOL, NO LEARNING PHASES.
+Predefine ONLY the total unrolled/unfolded budget of fan-in-2 gates S (as an address lattice
+rank × channel × 32² so position/relative-pattern/acyclicity exist) + input bits + voting
+head. Learned = exactly TWO discrete objects: (1) WIRING (2 taps/gate → any lower rank;
+skips/depth-attention = the δr tap coord) and (2) the PARTITION (per-field tying along any
+lattice axis incl. rank: rank-spanning = recurrence, spatial = conv). EMERGENT, not
+mechanisms: fan-in (= subtree size — NO fan-in parameter, NO 2^n table ever; the gate count
+allocated to a subfunction is the "degree" interpolating from coarse functions toward the
+unreachable exponential family; TTs are NEVER decomposed — splitting a big TT into smaller
+ones interferes; refinement unties WHO shares, never WHAT is computed), width, depth
+(pass-through TTs = transparent ranks), architecture. ONE PROTOCOL: every move =
+(partition node, field, discrete delta ∈ {tt flips, tap edit, sgn, cls, SPLIT, MERGE}) →
+overlay → rank-ordered exact recompute → full-train hinge → accept/XOR-revert; SPLIT
+neutral-free, reject halves by DESCENDING the partition. No phases: all granularities live
+from round 0, coarse→fine EMERGES from bandit hinge/second economics; split depth decided by
+measured cross-member correlation (disagreement D(G) = free-gain − tied-gain from the exact
+ben tables), never a schedule. Coarsest init = ONE group: the net starts as a learned binary
+cellular automaton and CD differentiates an architecture out of it. DELETED by the reframe:
+learned-fan-in-inside-TT lever, macro-gate init as a special concept, K as semantic knob
+(substrate K=2; K=6 kept only as A/B arm at matched unrolled budget), hand-tapered channel
+pyramids as default.
+
+Original design notes (machinery below remains valid):
+Design decision: **the hierarchy lives in the OPTIMIZER, not the executor.** The executable
+net stays what cd.py is (materialized fan-in-K LUT slots, bitpacked, cascade, exact-hinge
+accepts). New: every learnable field (tt, taps, sign, cls, step) is addressed through a
+**partition tree** over slots — `leaf_value = fold(ancestor deltas)` (XOR for bits, + for
+coords). What generalizes:
+- **Move at any node** = coordinated flip on all descendant leaves (cd_joint's multi-gate
+  accept, generalized), verified on the exact hinge. One coarse accept moves thousands of
+  gates for ~one partial forward — "low harmonics first", exact. Bandit arms become
+  (op × tree-level × layer): the coarse→fine schedule is LEARNED, not hand-annealed, and
+  coarse coefficients stay live after refinement (late low-frequency moves remain possible).
+- **Refinement** = add children with ZERO deltas → behavior-identical, test-free (the
+  net2net-neutral trick, now the universal structural op).
+- **TT coarse-to-fine**: a "fan-in-n" macro gate = balanced tree of n-1 fan-in-2 LUTs with
+  TTs *tied* through the group tree (one 4-bit TT per tree level ≈ m·n bits, not 2^n).
+  Untying = adding harmonics; endpoint (free 2-input gates) reached purely by untying.
+  REJECTED alternative: coarse gates as literal LTFs / low-degree Walsh coefficients,
+  decomposed into gates later — decomposition moves are lossy, breaks everything-exact;
+  tied tree has the same coarse dim and is executable from round 0. Internal tree nodes are
+  slots → they vote → multi-output ("many fanout") for free.
+- **Connection coarse-to-fine**: taps = group pattern (source layer, base coord, per-tap
+  offset table) + hierarchical leaf deltas. Coarse rewire retargets a whole group's
+  receptive field or source DEPTH (learned skips at group granularity). Locality prior and
+  `step` become special cases of the pattern.
+- **Sharing in ALL directions**: a group = set of placements in the (layer × c × h × w)
+  lattice; orbits may span depth (iterated block, ALBERT-style). Current copies+stride
+  sharing = the spatial special case, to be SUBSUMED (share_move/split_move deleted).
+  Depth-tied cascade recomputes in rank order (explicit-rank DAG already provides this).
+- **Width/depth learned**: growth = neutral refinement (width split exists; depth split =
+  insert pass-through/residual-init block, exactly neutral). Reverse op **coarsen/merge**
+  (fold groups whose deltas stayed ~0) = the capacity-annealing 💡, attacks the overfit gap.
+- WHY THIS ATTACKS THE WALL: trajectory finding says the 47–50 ceiling is the optimization
+  (val gain/round decelerating) — per-gate moves are too high-frequency; multigrid is the
+  standard cure for exactly that.
+
+Refactor stages (exactness checks must pass at every stage):
+1. 🔬 `Group` forest beside existing arrays (parent ptrs, per-field deltas); materialized
+   leaves stay the execution source of truth; `--check` folds the tree and diffs vs leaves.
+2. 🔬 Levers take a node, not a gid: masked delta on all descendant leaves, one exact
+   accept, XOR-revert on reject (generalize cd_joint).
+3. 🔬 Re-express sharing/splits as groups; delete share_move/split_move (cd.py shrinks).
+4. 🔬 Depth-spanning groups + neutral depth-insert op.
+5. 🔬 Macro-gate init: net starts as few fan-in-2 trees with tied TTs + patterned taps
+   (replaces `--init-deg` as THE coarse init).
+6. 🔬 Bandit arms (op × level); refine/coarsen become priced ops.
+
+## Reinforcement learning
+- ✅ **Bandit operator scheduler** — epsilon-greedy × probability-matching over (operator ×
+  layer) arms, reward = exact hinge-decrease per second, EMA credit. This IS the "RL" core:
+  it learns which lever at which depth pays, pricing in cascade cost. The e/K floor is
+  load-bearing (see Thompson below).
+- ✅ **Prioritized gate visiting** (`heat`, = prioritized experience replay) — per-gate EMA
+  of recent hinge yield steers the search budget; floor keeps cold gates covered; decays.
+  Broke a 4-round val plateau (44.5→45.9).
+- ✅ **Difference rewards / counterfactual credit** (COMA-style, multi-agent RL) — the
+  `rebuild` lever: each gate's exact marginal vote value (leave-one-out, computable because
+  the head is linear in votes); gates whose removal would *help* are deadwood → replaced
+  with fresh randoms. Validated firing 50–180/round.
+- ❌ **Thompson sampling arm choice** — posterior draw per arm instead of epsilon-greedy.
+  REFUTED hard: collapsed onto one cheap-reward arm, starved tt/rewire/splits entirely
+  (val 28 vs 32). Deleted; the epsilon floor is what keeps a non-stationary bandit honest.
+- 🔬 **Discounted-UCB / sliding-window bandit** — principled non-stationary arm values
+  (landscape shifts as the net trains) without Thompson's collapse.
+- 🔬 **Count-based exploration bonus** — sqrt(log t / n_visits) added to gate priority; the
+  principled version of heat's coverage floor.
+- 🔬 **Macro-actions / options** — composite arms ("split then RS the clones apart",
+  "share-up then re-step") so the bandit prices synergies single moves can't express.
+- 🔬 **REINFORCE-style learned proposal policies** — the mutation distributions (rewire
+  offset, which TT cells to burst, step-edit type) become learned categoricals updated by
+  accepted-improvement, per layer. The search itself gets a policy.
+- 🔬 **Value function / critic for structural moves** — splits have *deferred* value the
+  reward-now bandit prices at zero (this is why we batch them by hand). Train a small critic
+  on observed hinge-improvement-over-next-k-rounds to pick which gates to split. Proper
+  temporal credit assignment for architecture growth.
+- 🔬 **Population-based training (PBT)** — automate the twin-GPU races: N runs, periodic
+  exploit (losers copy winner ckpt) + explore (perturb temp, lever mix, aug). Meta-RL over
+  hyperparameters. (We do this by hand now; the small-run sweeps are step one.)
+- 💡 **Data-axis prioritized replay / curriculum** — weight the hinge toward
+  borderline-margin images (the ones accepts can flip), anneal to full distribution.
+
+## Evolution strategies / evolutionary computation
+- ✅ **(1+1)-ES per gate** (`rs_pass`) — random binary mutations (multi-bit TT bursts, local
+  re-taps), exact-fitness selection, neutral drift on plateaus.
+- ✅ **Best-of-n selection** (`rewire`) — evolutionary tournament for connections.
+- ✅ **net2net output-neutral cloning** (`split_move`) — capacity grows where it later pays,
+  no random-refill penalty; exactly hinge-neutral so no accept test.
+- ✅ **Annealed uphill acceptance** (`rs-temp`, simulated annealing) — accept bounded-worse
+  moves, decays on the explore schedule. (Under ablation in wave-1 `w1_temp0`.)
+- ❌ **PBIL / estimation-of-distribution refills** — fresh gates sampled from per-layer bit
+  marginals of *surviving* gates instead of uniform. REFUTED: tie with uniform (val 35.5 vs
+  35.25), no gain for the cost. Deleted.
+- ❌ **Per-round random-batch accepts** — cheap accepts on a fresh batch each round.
+  REFUTED: accepts overfit the batch, val crawled 27–28 while exact full-train jumped.
+- 🔬 **Extremal optimization** (Boettcher–Percus, statistical physics) — always attack the
+  *worst* components: power-law selection over per-gate exact harm. Complements heat (finds
+  improving regions) by finding deadwood; rebuild already computes the harm signal.
+- 💡 **Novelty search / quality-diversity** — bias neutral drift toward behavioral novelty
+  (per-class score signatures), guard against the population converging to redundant gates.
+- 💡 **Parallel tempering** (physics) — replicas at different rs-temp exchanging checkpoints
+  when the hotter one wins; natural extension of the twin-GPU infra.
+
+## Neuroscience / biologically-inspired
+- ✅ **Signed votes / Dale's law** (`sign_pass`) — per-gate vote polarity: features can be
+  negative evidence (inhibitory populations). CASCADE-FREE (outputs unchanged, only head
+  reweights) → cheapest lever. Validated firing, decaying as polarity settles.
+- ✅ **Residual initialization** (conv-difflogic, also skip-connection biology) — fraction
+  of fresh TTs start as pass-through so signal flows through depth from round 0. Won its A/B
+  with locality (36.5 vs 31.8).
+- ✅ **Locality prior** (retinotopy / local receptive fields) — fresh taps start within ±R
+  px of the gate's position; rewiring undoes it where long-range pays. Same A/B win.
+- 💡 **Forward-Forward-style layer-local goodness** (Hinton 2022; VFF-Net 2025) — give
+  neutral drift a *direction*: among hinge-equal moves prefer those increasing per-layer
+  class separability. Turns aimless plateau drift into layerwise representation learning,
+  still no backprop. Refs: ncbi PMC12586560, techxplore VFF-Net.
+- 💡 **Homeostatic plasticity / target firing rates** — regularize each gate toward ~50%
+  activation so no gate goes dead or constant; keeps capacity usable.
+- 💡 **Structural plasticity / dendritic gating** — depth-wise skip taps chosen by a
+  learned per-gate gate on which layer to read (biology: dendritic compartments).
+
+## Graph-based / combinatorial optimization
+- ✅ **Explicit-rank DAG** — layers + connections into strictly-lower layers make the circuit
+  acyclic under any shift; enables O(1) depth-0-style updates + bounded cascades.
+- 🔬 **Survey/belief propagation** (SAT-solver lineage) — the net IS a circuit; message
+  passing over it could propose coordinated multi-gate changes no local search finds.
+  Highest risk / highest novelty.
+- 💡 **Spectral / community-structured wiring** — init or bias connections by graph
+  community structure of feature co-activation instead of pure locality.
+- 💡 **Min-cut / flow-based pruning** — identify and cut low-information subgraphs wholesale
+  rather than per-gate rebuild.
+
+## Architecture (learned by the search, not hand-set)
+- 🔬 **Learned OUTPUT connection** (`cls_pass`, cd-cl, NEW 2026-07-05) — until now each slot's
+  vote class was HARDWIRED to `channel % 10`: the head could only flip polarity (sgn), never
+  choose which class a gate votes for. So a great feature computed in the "wrong" channel
+  could only be credited to that channel's class — an arbitrary cap on the readout, and the
+  class quota (S/10 per class) was frozen. `ocls` makes the output class per-slot LEARNABLE
+  (init = channel%10, so behavior is preserved until CD moves it); `cls_pass` proposes the
+  best class per gate from the ±1 tables and verifies on the exact hinge with halving.
+  Cascade-FREE (only the head re-attributes; stored outputs untouched, like sign_pass).
+  EXACTNESS VERIFIED (isolated + --check: state diff 0.0, hinge drift 0.0; fires ~130/300
+  gates/call). This is literally the user's "learn the output connection." A/B pending.
+- ✅ **Learned weight sharing** = per-gate convolution (share degree per dim).
+- ✅ **Learned input strides** (`step`) — decouples input stride from output tiling →
+  stride/dilation/overlap/exact-tying all reachable; also makes channel splits neutral.
+- ✅ **Flat spatial (32²) default** — BEAT the CNN pooling pyramid 47.3 vs 45.9 over a 5h
+  parity race (pyramid stronger per round, 2× round cost never amortized). `--spatial`
+  machinery kept for the scale path (coarse layers cut slots×D memory quadratically).
+- 🔬 **Depth vs width at matched slots** — current wave/next wave probe.
+- 🔬 **OR-pooling layers** (conv-difflogic ingredient 3) — max-t-conorm pooling as a layer
+  type; pairs with spatial downsampling for their 61M-gate scale.
+  → INSIGHT (2026-07-05): NO risky new layer type needed. A LUT gate with truth table
+  fixed/biased to OR over K local taps into a COARSE `--spatial` layer *is* OR-pooling:
+  downsampling = coarse grid (exists, exact), locality = `--init-loc`, and CD can refine it.
+  So pooling is reachable with existing exact machinery + a small OR-biased-init flag. Test =
+  run deg000 WITH a `--spatial` pyramid, long (the shape race that rejected pyramids was at
+  SHARED init on a wall-clock metric — never tested with deg000 for final val).
+- 🔬 **Logic-gate tree kernels** (conv-difflogic) — multi-gate trees as the conv primitive.
+
+## Regularization / generalization (the current bottleneck: train 53 / val 47, gap growing)
+- ✅ **Re-rolled augmentation** (flip + crop + jitter, fresh each round) — keeps the hinge
+  from freezing; the stochasticity that replaces SGD minibatch noise.
+- ❌ **Cutout** — REFUTED: hurts while the model underfits (it doesn't, now — worth
+  re-testing under the current overfit regime; wave-1 `w1_aug6` tests jitter strength first).
+- 🔬 **Stronger jitter / crop** — `w1_aug6` (jitter 0.6) live now.
+- 💡 **Slower unsharing / capacity annealing** — the gap grows as sharing→0; hold capacity
+  back until val stops tracking train.
+- 💡 **DropConnect on votes** — randomly zero a fraction of gate votes per round (ensemble
+  regularization, discrete-native).
+
+---
+
+## Fast-iteration sweeps (small runs, one variable each, same seed, 184k-slot 6-layer net,
+## 14 rounds ≈ 50 min). Winners compound into defaults; losers deleted. Val@14:
+
+**Wave 1** (baseline = old defaults): deg011 **44.2** ✅ · split512 **43.0** ✅ · temp0 40.1 ·
+ctrl 40.1 · expfast 39.9 · aug6 39.3 ❌ · k4 37.8 ❌ (K=6 confirmed) · deg033 37.7 ❌.
+→ VERDICT: less initial sharing wins big. Adopted defaults `init-deg 0,1,1`,
+`split-batch 512`. (Flips the earlier conv-init promotion — that was for an OVERFITTING
+shallow net; at depth-8 heavy tiling straitjackets the search.) Annealing/expfast/aug were
+neutral-or-worse but kept (temp0≈ctrl, not clearly refuted).
+
+**Wave 2** (baseline = wave-1 winners): deg000 **50.1** ✅ (fully unshared — new deep-net
+best, adopted as default) · wide 46.8 · rs75 46.1 · rew75 45.6 · ctrl 45.1 · split1k 45.0 ·
+loc4 45.1 · deep10 43.2 ❌ (deeper hurt). → VERDICT: unsharing monotonically wins
+(0,0,0 > 0,1,1 > 0,2,2 > 0,3,3). Conv prior at init straitjackets the deep search. Adopted
+`init-deg 0,0,0`. New bottleneck: deg000 train 74 / val 50 = **24-pt overfit gap**.
+
+**Wave 3** (baseline = deg000): regularization knobs on the overfit gap — cutout 8/12,
+jitter 0.6, crop 6, cutout+jitter combo. [running, 6 jobs, r14]
+
+### ⚠️ Trajectory finding (from cdd8 big-run curve + wave-2) — reframes the whole effort:
+Val sits near a **~47–50 ceiling across wildly different regimes**: shared-1.35M-slot
+underfits (train 53 / val 47, 6-pt gap, still crawling +0.15/round at r38) while
+unshared-184k-slot overfits (train 74 / val 50, 24-pt gap). Higher val at 7× FEWER slots
+when unshared. **So the wall is neither pure capacity nor pure overfit — it's the
+representation/optimization itself.** Two consequences:
+1. 14-round sweeps RANK knobs; they do NOT converge — the big run climbed val 42→47
+   monotonically over r6→r38 with no plateau. We have been KILLING RUNS TOO EARLY. The real
+   number needs the winning recipe run LONG (40+ rounds) and at SCALE.
+2. Aug-regularization (wave 3) can only shave the gap a few points; it will NOT break 50→80.
+   The ceiling-raisers are: (a) scale (does the ~50 wall rise with slots? untested at the
+   deg000 recipe), (b) OR-pooling / gate-tree kernels (conv-difflogic's actual 86%
+   ingredients, not yet implemented), (c) fundamentally faster optimization (val gain/round
+   is decelerating hard).
+
+Best val to date: 55.0 (depth-0 flat, historical); deep-net best 50.1 (deg000, r14, unconverged).
