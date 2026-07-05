@@ -99,6 +99,13 @@ Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
   r20 — +3.9 over the old wall in a third of the wall-clock, gap ~12, still climbing.
 - 🔬 gen4 (running): hash-full vs grow-and-earn small-start (--init-tsize 8, cd-ms lever)
   on the new BASE, r30 — is LEARNED per-gate capacity the better regularizer?
+- gen2 finals: margin-1 pyramid WALLS at ~52.7 (r19-24 flat; killed r24) — margin 2 is
+  worth ~+2 asymptotically, not just early. ❌ pyrhash (hash init, margin-1 pyramid)
+  refuted at horizon: 48.0 @ r21, +0.15/round — killed; gen4_hashfull (margin 2) is the
+  surviving hash-init probe. pyr2x/gen3_2x: width behind at parity under BOTH margins
+  (~2 pts, 2.6x cost) — capacity-via-width keeps losing to capacity-via-margin/geometry.
+- gen5 (queued): explore-anneal within the run (1:0.3:30 — pyrlong's late jump at r19
+  suggests schedule shape matters) + r60 frontier run to locate the compounded wall.
 Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
 of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
 symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —

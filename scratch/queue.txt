@@ -1,1 +1,1 @@
-gen2_pyrhash::--spatial 32,32,16,16,8,8 --gate hash --rounds 30
+gen5_long60::--rounds 60
