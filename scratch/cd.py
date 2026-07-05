@@ -416,14 +416,20 @@ class Win:
         return score
 
     @torch.no_grad()
-    def evaluate(self, input_bits: torch.Tensor, y: torch.Tensor, rows: int = 2048) -> float:
-        d = input_bits.shape[1]
-        pk = pack_bits(input_bits.to(self.device))
-        if self.L > 1:
-            pk = torch.cat([pk, torch.zeros((self.S, pk.shape[1]), dtype=torch.int64,
-                                            device=self.device)])
-        s = self.forward(pk, d, rows)
-        return 100.0 * (s.argmax(0).cpu() == y).float().mean().item()
+    def evaluate(self, input_bits, y: torch.Tensor, rows: int = 2048) -> float:
+        """input_bits: one encoded view (n, D) or a LIST of views (test-time augmentation:
+        class scores are summed over views -- e.g. image + mirror -- before the argmax)."""
+        views = input_bits if isinstance(input_bits, list) else [input_bits]
+        tot = None
+        for v in views:
+            d = v.shape[1]
+            pk = pack_bits(v.to(self.device))
+            if self.L > 1:
+                pk = torch.cat([pk, torch.zeros((self.S, pk.shape[1]), dtype=torch.int64,
+                                                device=self.device)])
+            s = self.forward(pk, d, rows)
+            tot = s if tot is None else tot + s
+        return 100.0 * (tot.argmax(0).cpu() == y).float().mean().item()
 
     def train_acc(self) -> float:
         return 100.0 * (self.score.argmax(0) == self.y).float().mean().item()
@@ -1161,6 +1167,25 @@ def augment(x: torch.Tensor, crop: int = 4, jitter: float = 0.0) -> torch.Tensor
     return x
 
 
+def in_feats(x: torch.Tensor) -> torch.Tensor:
+    """Append FIXED edge/multi-scale channels to the RGB image (D, 3, 32, 32) -> (D, 8,
+    32, 32), all in [0, 1]: Sobel-x, Sobel-y (signed, recentered), gradient magnitude,
+    |Laplacian|, and a 2x-box-blurred grayscale. These are rank-0 sources like any input
+    bit -- the wiring search taps them where they pay (the "first conv layer is an edge
+    detector" handed over for free; thermometer thresholds are fit per channel)."""
+    import torch.nn.functional as F
+    g = x.mean(1, keepdim=True)
+    kx = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]]).view(1, 1, 3, 3) / 4
+    kl = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]]).view(1, 1, 3, 3) / 4
+    sx = F.conv2d(g, kx, padding=1)
+    sy = F.conv2d(g, kx.transpose(2, 3), padding=1)
+    mag = (sx.abs() + sy.abs()).clamp(0, 1)
+    lap = F.conv2d(g, kl, padding=1).abs().clamp(0, 1)
+    blur = F.avg_pool2d(F.avg_pool2d(g, 2), 1)
+    blur = F.interpolate(blur, size=32, mode="nearest")
+    return torch.cat([x, sx * 0.5 + 0.5, sy * 0.5 + 0.5, mag, lap, blur], 1)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path, default=Path("data/cifar-10-batches-py"))
@@ -1251,6 +1276,14 @@ def main():
                    help="full: flip+crop+jitter, re-rolled every --aug-every rounds")
     p.add_argument("--aug-crop", type=int, default=4)
     p.add_argument("--aug-jitter", type=float, default=0.0)
+    p.add_argument("--in-feats", choices=["none", "edge"], default="none",
+                   help="edge: append 5 fixed edge/multi-scale channels (Sobel-x/y, "
+                        "gradient magnitude, |Laplacian|, blurred gray) to the input "
+                        "before thermometer encoding -- free rank-0 features the wiring "
+                        "taps where they pay")
+    p.add_argument("--tta", type=int, default=0,
+                   help="1: test-time augmentation -- sum class scores over image + "
+                        "mirror at val/test eval (2x eval cost, train untouched)")
     p.add_argument("--aug-every", type=int, default=1)
     p.add_argument("--init-deg", type=str, default="0,0,0",
                    help="initial log2 sharing degrees per dim c,h,w. Waves 1-2 measured (deep "
@@ -1282,17 +1315,25 @@ def main():
         tx, ty = tx[: args.train_size], ty[: args.train_size]
     nv = max(1, round(len(tx) * 0.1))
     vx, vy, px, py = tx[-nv:], ty[-nv:], tx[:-nv], ty[:-nv]
-    enc = Thermometer(num_bits=args.num_bits).fit(px[:2000])
+    feats = in_feats if args.in_feats == "edge" else (lambda t: t)
+    ci_img = 8 if args.in_feats == "edge" else 3
+    enc = Thermometer(num_bits=args.num_bits).fit(feats(px[:2000]))
 
     def encode(images):
-        return enc(images).flatten(1).t().contiguous().to(torch.uint8)
+        return enc(feats(images)).flatten(1).t().contiguous().to(torch.uint8)
 
-    Xva, Xte = encode(vx), encode(ex)
+    def views(images):
+        v = [encode(images)]
+        if args.tta:
+            v.append(encode(images.flip(-1)))
+        return v if args.tta else v[0]
+
+    Xva, Xte = views(vx), views(ex)
     chs = [int(v) for v in args.channels.split(",")]
     hws = [int(v) for v in args.spatial.split(",")]
     if len(hws) == 1:
         hws = hws * len(chs)
-    win = Win(3 * args.num_bits, 32, chs, hws, args.fan_in, args.max_copies, dev,
+    win = Win(ci_img * args.num_bits, 32, chs, hws, args.fan_in, args.max_copies, dev,
               init_deg=tuple(int(v) for v in args.init_deg.split(",")),
               init_loc=args.init_loc, init_res=args.init_res, gate=args.gate,
               tsize=args.tsize, margin=args.margin, hinge_cap=args.hinge_cap,
