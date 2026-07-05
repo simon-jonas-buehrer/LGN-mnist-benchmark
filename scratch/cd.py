@@ -1136,13 +1136,12 @@ class Win:
 
 
 # ==========================================================================================
-def augment(x: torch.Tensor, crop: int = 4, jitter: float = 0.0, cut: int = 0) -> torch.Tensor:
+def augment(x: torch.Tensor, crop: int = 4, jitter: float = 0.0) -> torch.Tensor:
     """Standard CIFAR augmentation on (D,3,32,32) [0,1] images: random horizontal flip,
-    random crop from `crop`-pixel replicate padding, optional brightness/contrast jitter,
-    optional cut x cut cutout (gray fill). Re-rolled every round, this is stochastic
-    augmentation like SGD sees: the hinge can never permanently reach zero, so optimization
-    pressure never dies. (Cutout was removed while the net underfit; re-added once
-    init-deg 0,0,0 pushed us to a 24-pt train/val gap -- overfit regime, re-testing.)"""
+    random crop from `crop`-pixel replicate padding, optional brightness/contrast jitter.
+    Re-rolled every round, this is stochastic augmentation like SGD sees: the hinge can
+    never permanently reach zero, so optimization pressure never dies. (Cutout was A/B'd
+    twice -- underfit regime AND 20-pt-gap overfit regime -- null both times; deleted.)"""
     d = x.shape[0]
     fl = torch.rand(d) < 0.5
     x = torch.where(fl[:, None, None, None], x.flip(-1), x)
@@ -1151,13 +1150,6 @@ def augment(x: torch.Tensor, crop: int = 4, jitter: float = 0.0, cut: int = 0) -
         c = 1.0 + (torch.rand(d, 1, 1, 1) - 0.5) * 0.4 * jitter      # contrast scale
         m = x.mean((1, 2, 3), keepdim=True)
         x = ((x - m) * c + m + b).clamp_(0, 1)
-    if cut:
-        oy = torch.randint(0, 33 - cut, (d, 1))
-        ox = torch.randint(0, 33 - cut, (d, 1))
-        rng = torch.arange(32)[None, :]
-        m = ((rng >= oy) & (rng < oy + cut))[:, :, None] \
-            & ((rng >= ox) & (rng < ox + cut))[:, None, :]
-        x = torch.where(m[:, None, :, :], torch.full_like(x, 0.5), x)
     if crop:
         p = torch.nn.functional.pad(x, (crop,) * 4, mode="replicate").permute(0, 2, 3, 1)
         oy = torch.randint(0, 2 * crop + 1, (d,))
@@ -1259,7 +1251,6 @@ def main():
                    help="full: flip+crop+jitter, re-rolled every --aug-every rounds")
     p.add_argument("--aug-crop", type=int, default=4)
     p.add_argument("--aug-jitter", type=float, default=0.0)
-    p.add_argument("--aug-cut", type=int, default=0)
     p.add_argument("--aug-every", type=int, default=1)
     p.add_argument("--init-deg", type=str, default="0,0,0",
                    help="initial log2 sharing degrees per dim c,h,w. Waves 1-2 measured (deep "
@@ -1325,7 +1316,7 @@ def main():
         is exact on all of it -- per-round re-rolls are the stochasticity. (A per-round
         random-batch mode was tried and measured strictly worse: accepts overfit the
         batch and val crawled; exact full-train accepts won.)"""
-        xb = augment(px, args.aug_crop, args.aug_jitter, args.aug_cut) if args.aug == "full" else px
+        xb = augment(px, args.aug_crop, args.aug_jitter) if args.aug == "full" else px
         win.set_train(encode(xb), py, args.pass_rows)
 
     t0 = time.time()

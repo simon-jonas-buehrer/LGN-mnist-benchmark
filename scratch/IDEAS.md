@@ -90,8 +90,15 @@ Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
   same day (measurement + verdict preserved here).
 - ✅ **MARGIN 2 WON** (gen1_margin2): val 51.36 @ r8 / test 51.28 — +2.0 over ctrl at round
   parity, beat ctrl's ENTIRE r14 run (50.48) in 8 rounds. Boosting-margin regularization
-  delivers; compounded into base.env together with the pyramid. Dose-response running
-  (margin4 @ r3: 49.2, gap 15.6 — best flat-geometry gap; margin8 launched).
+  delivers; compounded into base.env together with the pyramid. DOSE-RESPONSE (flat, r8):
+  m=1: 49.4, m=2: 51.4, m=4: 51.7 (gap 16.8, best), m=8: 49.0 ❌ (overshoot; killed @ r6).
+  On the pyramid m=2 ≥ m=4 at parity → BASE keeps margin 2 (flat 2–4 plateau = robust).
+- ❌ **CUTOUT REFUTED (2nd time)** (gen1_cut8): 49.2 @ r8 vs ctrl 49.4 — null in the
+  overfit regime too (first refutation was in the underfit regime). Code deleted.
+- ✅ **WINNERS COMPOSE** (gen3_ctrl30 = pyramid + margin2): 51.5 @ r7 (16 min!), 54.04 @
+  r20 — +3.9 over the old wall in a third of the wall-clock, gap ~12, still climbing.
+- 🔬 gen4 (running): hash-full vs grow-and-earn small-start (--init-tsize 8, cd-ms lever)
+  on the new BASE, r30 — is LEARNED per-gate capacity the better regularizer?
 Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
 of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
 symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —
