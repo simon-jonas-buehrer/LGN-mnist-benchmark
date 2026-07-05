@@ -125,6 +125,26 @@ fundamental-issues pass, not just A/B):
    |corr|=0.02-0.05 (signal collapse cleared at wiring AND function level), per-run
    optimization (train 67+). Val margins razor-thin: median 0.14 tau, 11% wrong-confident.
 
+OVERNIGHT (2026-07-06 early): **50.1 -> 64.9 in one day.**
+- ✅ **EDGE INPUT FEATURES + TTA = the day's biggest lever**: +6.7 at round parity at
+  UNCHANGED scale (gen6_edge r30 final: 63.58/63.01). Confirms the diagnosis: L0 was
+  burning its 82k gates re-deriving edges from thermometer bits.
+- ✅ **SCALE compounds**: gen6_big3x (3x, 403k slots, edge+tta) r40 final **64.92 val /
+  64.34 test**, still climbing at the round cap -> RESUMED to r80. Passed plain deep
+  difflogic's SGD-trained ~62 with pure forward-only search. big10x: r1 completed at
+  51.6 (!) then OOM'd on a 12GB card; resubmitted pinned to a 3090, resuming.
+- ✅ **POPULATION MERGE-AND-CONTINUE WORKS** (gen7_merged4): 4 parents (~55 each, frozen
+  ensemble 58.8) merged exactly (scratch/merge.py, bit-verified) then CD-continued ->
+  60.8 @ r49 and climbing. Cross-model rewiring adds ~+2 over the frozen ensemble.
+- ⚠️ **COMPOUNDING HAZARD caught**: gen7_fattop (new BASE = nb5+edge) sits ~8 pts below
+  the edge arm (nb8) — nb5's +1.1 was measured PRE-edge and likely inverts with 8 input
+  channels (40 vs 64 bits/pixel). gen8 decoupling arms running (nb5-edge ctrl, nb8
+  fattop). Lesson: re-verify compounded winners when the context they were measured in
+  changes.
+- Pre-edge recipe asymptote CLOSED at ~56 (long60 r57, ann60 r60, front replicas).
+- ❌ noshare knockout run invalidated by budget coupling (share budgets fund ALL arms via
+  the sampler); rerun with --work-frac 6.5 compensation (gen7_noshare2, running).
+
 Late-evening verdicts (2026-07-05):
 - **FRONTIER r30**: gen3_ctrl30 (pyr+margin2) best val 54.88 @ r26 / ~54.7 @ r30, train
   only 67 (gap 12.1), 71 min. Day total: 50.1 → 54.9. margin4-on-pyr ≤ margin2 confirmed.

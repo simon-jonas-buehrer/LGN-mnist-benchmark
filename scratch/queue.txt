@@ -1,1 +1,1 @@
-gen7_fattop::--channels 80,40,40,40,40,40 --explore 1:0.3:30 --rs-temp 0 --rounds 30
+gen8_fattop8::--channels 80,40,40,40,40,40 --num-bits 8 --rounds 14
