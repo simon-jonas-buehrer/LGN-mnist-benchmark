@@ -1,1 +1,2 @@
-gen8_fattop8::--channels 80,40,40,40,40,40 --num-bits 8 --rounds 14
+gen8_edge_s3::--num-bits 8 --seed 3 --rounds 30
+gen8_edgelong::--num-bits 8 --rounds 60
