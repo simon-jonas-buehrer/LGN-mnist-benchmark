@@ -1,1 +1,2 @@
-gen5_nb5::--num-bits 5 --rounds 14
+gen6_edge::--in-feats edge --tta 1 --explore 1:0.3:30 --rs-temp 0 --rounds 30
+gen7_noshare::--share-moves 0 --rs-shares 0 --splits 0 --explore 1:0.3:30 --rs-temp 0 --rounds 30

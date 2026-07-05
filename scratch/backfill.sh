@@ -10,7 +10,7 @@ while true; do
   [ -s "$Q" ] || { echo "backfill queue empty -- done"; exit 0; }
   in_use=$(squeue -u "$USER" -h -o "%b" 2>/dev/null | grep -c gpu)
   mine=$(squeue -u "$USER" -h -o "%j" 2>/dev/null | grep -cE '^(hg|reg|gen)' || true)
-  if [ "$in_use" -lt 18 ] && [ "$mine" -lt 8 ]; then
+  if [ "$in_use" -lt 18 ] && [ "$mine" -lt 10 ]; then
     spec=$(head -1 "$Q")
     tag="${spec%%::*}"; extra="${spec#*::}"
     out=$(sbatch --gres=gpu:1 --cpus-per-task=4 --mem=32G --time=04:00:00 \
