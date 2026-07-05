@@ -1390,9 +1390,15 @@ def main():
     # hinge decrease per second); persists across rounds (bandit memory). With depth each
     # chunk operator becomes one arm PER LAYER, so the bandit also learns which layers are
     # currently worth their (cascade) cost.
-    CHOPS = ("cd-tt", "cd-cn", "cd-cf", "cd-ms", "cd-st", "cd-sg", "cd-cl", "cd-rb", "rs-cn",
-             "rs-tt")
-    OPS = tuple(f"{o}@{l}" for o in CHOPS for l in range(win.L)) + ("cd-sh", "rs-sh", "sp")
+    # bandit ledger (measured on 30-round runs): cd-tt/cd-cl/cd-sg/cd-cn/cd-cf carry ~95%
+    # of credited hinge; the SHARING axis (cd-sh/rs-sh/sp and the step lever that only
+    # applies to shared gates) earns ~0 on unshared-init nets while eating 15-20% of the
+    # budget. Zeroing all sharing budgets drops those arms from the bandit entirely.
+    sharing = args.share_moves > 0 or args.rs_shares > 0 or args.splits > 0
+    CHOPS = ("cd-tt", "cd-cn", "cd-cf", "cd-ms", "cd-sg", "cd-cl", "cd-rb", "rs-cn",
+             "rs-tt") + (("cd-st",) if sharing else ())
+    OPS = tuple(f"{o}@{l}" for o in CHOPS for l in range(win.L)) \
+        + (("cd-sh", "rs-sh", "sp") if sharing else ())
     opq = dict.fromkeys(OPS, 0.0)
     exs = [float(v) for v in args.explore.split(":")]
 
@@ -1497,10 +1503,11 @@ def main():
             prog(op, rnd, u, budget, sum(cnt.values()))
         heat *= 0.97                                                 # priorities age out
         agg = {o: sum(v for k, v in cnt.items() if k.split("@")[0] == o) for o in CHOPS}
+        agg.setdefault("cd-st", 0)
         bits, rews = agg["cd-tt"], agg["cd-cn"]
-        shares = cnt["cd-sh"]
+        shares = cnt.get("cd-sh", 0)
         rsa = agg["rs-cn"] + agg["rs-tt"] + agg["cd-cf"] + agg["cd-ms"] + agg["cd-st"] + agg["cd-sg"] \
-            + agg["cd-cl"] + agg["cd-rb"] + cnt["rs-sh"] + cnt["sp"]
+            + agg["cd-cl"] + agg["cd-rb"] + cnt.get("rs-sh", 0) + cnt.get("sp", 0)
         va = te = float("nan")
         if rnd % args.val_every == 0:
             va, te = win.evaluate(Xva, vy, args.pass_rows), win.evaluate(Xte, ey, args.pass_rows)
