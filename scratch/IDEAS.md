@@ -64,6 +64,13 @@ hg2 (running): hash init at M=64 with K=6/12/16, K=12 M=256, lut K=8 — does a 
 budget with constant table size pay? reg1 (running): spatial pyramid 32,32,16,16,8,8; cutout
 queued for backfill.
 
+FINALS (2026-07-05 late): hg1_ctrl r14 = val 50.36 / test 50.33 (peak 50.48 @ r12) vs
+wave-2's 50.1 — cd-cf compounds, kept. hg2 finals: hashK6/M64 ended 47.0 @ r8, gap 10.6,
+still climbing (+1.5 over last 2 rounds vs ctrl's +0.6) → long-horizon retest queued on the
+pyramid base (gen2_pyrhash, r30). ❌ K12/K16 at M=64 REFUTED as INIT (6.5+ pts behind at
+round parity, 2x round cost — idle tap budgets don't pay; fan-in must GROW on demand via
+c=0 revival, stage 2b). ❌ K12+M256 canceled untested (both parents lost).
+
 Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
 - ✅ **cd-cf compounds on the live recipe**: hg1_ctrl val 50.48 @ r12 — beats wave-2's 50.1
   (r14) with the same everything else. Hash-weight moves are a keeper lever.
