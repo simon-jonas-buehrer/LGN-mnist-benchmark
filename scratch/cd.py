@@ -14,7 +14,9 @@ train set -- every accept is exact on all of train.
 
 A gate is a HASH GATE -- one gate type subsuming all function families: K connections
 (absolute source coords) + K learned integer hash weights c_k + an M-bit table T; output
-= T[(sum_k c_k * x_k) mod M] (M = 2**K for now; growing/halving M is stage 2). Corners of
+= T[(sum_k c_k * x_k) mod M] (--tsize sets M; default = the classic 2**K coupling; per-gate
+M growth is stage 2b). K and M are independent budgets -- taps vs table bits -- so K > 8
+works with small tables (--fan-in 16 --tsize 64 --gate hash). Corners of
 the (c, T) space: c_k = 2**k is the classic full LUT (--gate lut, bit-exact with the old
 executor); c in {-1,0,1} with a threshold-step T is a BitNet-style ternary threshold gate
 (--gate ternary, the stable no-wrap corner). CD moves the weights themselves (cd-cf), so
@@ -117,17 +119,26 @@ class Win:
 
     def __init__(self, ci: int, hw: int, chs: list[int], hws: list[int], fan_in: int,
                  max_copies: int, device: str, init_deg: tuple[int, int, int] = (0, 0, 0),
-                 init_loc: int = 0, init_res: float = 0.0, gate: str = "lut"):
-        assert len(hws) == len(chs) and all(c % CLS == 0 for c in chs) and fan_in <= 8
+                 init_loc: int = 0, init_res: float = 0.0, gate: str = "lut",
+                 tsize: int = 0):
+        assert len(hws) == len(chs) and all(c % CLS == 0 for c in chs)
         assert all(h & (h - 1) == 0 and 4 <= h <= hw for h in hws)   # powers of two
-        assert gate == "lut" or fan_in >= 3   # ternary needs M/2 >= K: signed sums distinct
         self.init_loc, self.init_res, self.gate = init_loc, init_res, gate
         self.chs, self.hws, self.L = list(chs), list(hws), len(chs)
         self.Ci, self.HWI = ci, hw                        # input grid
         self.N = ci * hw * hw                             # input bits
         self.S = sum(c * h * h for c, h in zip(chs, hws)) # slots over all layers (= votes)
-        self.K, self.TT = fan_in, 1 << fan_in
-        self.M = self.TT                                  # hash-table size (fixed, stage 1)
+        # table size M decouples from fan-in K: eval is O(K) unpacks, storage O(M) bits --
+        # K is a TAP BUDGET (c=0 taps are inert), M an EXPRESSIVITY budget. --tsize 0
+        # keeps the classic coupling M = 2**K (required for the lut corner's c_k = 2**k).
+        self.K = fan_in
+        self.M = self.TT = tsize if tsize else 1 << fan_in
+        assert self.M <= 16384                            # 2M-2 must fit the int16 hash acc
+        if gate == "lut":
+            assert fan_in <= 8 and self.M == 1 << fan_in  # place values need the full table
+        if gate == "ternary":
+            assert self.M >= 2 * fan_in + 2               # signed sums must stay distinct
+        assert fan_in <= 8 or tsize                       # K>8 only with an explicit M
         self.tau = math.sqrt(self.S / CLS)
         self.max_copies = max_copies
         self.device = device
@@ -212,15 +223,29 @@ class Win:
     def _rand_fn(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Fresh gate FUNCTIONS = (table, hash weights), drawn at the requested corner of
         the hash-gate space. --gate lut: c_k = 2**k + the random/residual tables above --
-        today's LUT gate, bit-exact. --gate ternary: c in {-1,0,1} (stored mod M) and T a
-        threshold step on the SIGNED cell value (BitNet-style ternary threshold, the
-        stable no-wrap corner: |sum| <= K < M/2, so nothing aliases); residual gates are
-        exact tap-0 pass-throughs (c = (1,0,...,0), step at 1). CD is free to walk any
-        gate anywhere in the space from either corner (cd-cf edits the weights)."""
+        today's LUT gate, bit-exact. --gate hash: c uniform in [1, M) + random tables --
+        input patterns spread over ALL M cells from round 0 (Bloom/WiSARD-style), full
+        capacity at any K/M ratio; residual gates are exact tap-0 pass-throughs
+        (c = (c0, 0, ..., 0), T = [j == c0]). --gate ternary: c in {-1,0,1} (stored mod
+        M) and T a threshold step on the SIGNED cell value (BitNet-style ternary
+        threshold, the stable no-wrap corner: |sum| <= K < M/2, so nothing aliases);
+        residual = tap-0 pass-through (c = (1,0,...,0), step at 1). Measured (hg1): the
+        ternary corner starts with only 2K+1 of M cells reachable -- dead capacity, badly
+        behind lut. CD walks any gate anywhere in the space from any corner (cd-cf)."""
         if self.gate == "lut":
             coef = (2 ** torch.arange(self.K, device=self.device)).to(torch.int16) \
                 .expand(n, self.K).contiguous()
             return self._rand_tt(n), coef
+        if self.gate == "hash":
+            coef = torch.randint(1, self.M, (n, self.K), device=self.device)
+            tt = torch.randint(0, 2, (n, self.TT), dtype=torch.int8,
+                               device=self.device).bool()
+            if self.init_res > 0 and n:
+                r = torch.rand(n, device=self.device) < self.init_res
+                c0 = coef[:, 0]
+                coef[r, 1:] = 0
+                tt[r] = torch.arange(self.M, device=self.device)[None] == c0[r][:, None]
+            return tt, coef.to(torch.int16)
         coef = torch.randint(-1, 2, (n, self.K), device=self.device)
         j = torch.arange(self.M, device=self.device)
         sj = torch.where(j > self.M // 2, j - self.M, j)             # signed cell value
@@ -1071,12 +1096,20 @@ def main():
                         "'32,32,16,16,8,8,4,4' is a CNN-style pooling pyramid -- coarser "
                         "layers cost fewer slots and see wider context")
     p.add_argument("--fan-in", type=int, default=4)
-    p.add_argument("--gate", choices=["lut", "ternary"], default="lut",
+    p.add_argument("--gate", choices=["lut", "hash", "ternary"], default="lut",
                    help="fresh-gate corner of the hash-gate space T[(sum c_k x_k) mod M]: "
                         "'lut' = c_k=2**k + random tables (the classic LUT gate, bit-exact "
-                        "with the old executor); 'ternary' = c in {-1,0,1} + threshold-step "
-                        "tables (BitNet-style, the stable corner). Init only -- cd-cf moves "
-                        "every gate freely in the space either way")
+                        "with the old executor); 'hash' = c uniform in [1,M) + random "
+                        "tables (full-table occupancy at any K/M, the only corner for "
+                        "K>8); 'ternary' = c in {-1,0,1} + threshold-step tables "
+                        "(BitNet-style -- measured badly behind in hg1: only 2K+1 of M "
+                        "cells reachable at init). Init only -- cd-cf moves every gate "
+                        "freely in the space either way")
+    p.add_argument("--tsize", type=int, default=0,
+                   help="table size M per gate (0 = 2**fan_in, the classic coupling). "
+                        "Decoupling M from K breaks the K<=8 LUT barrier: eval O(K), "
+                        "storage O(M) -- e.g. --fan-in 16 --tsize 64 --gate hash gives "
+                        "16-tap gates with 64-bit tables (impossible as a 2**16 LUT)")
     p.add_argument("--n-cand", type=int, default=8, help="candidate inputs per rewire visit")
     p.add_argument("--rewire-frac", type=float, default=0.25,
                    help="fraction of gates rewire-visited per round")
@@ -1168,7 +1201,8 @@ def main():
         hws = hws * len(chs)
     win = Win(3 * args.num_bits, 32, chs, hws, args.fan_in, args.max_copies, dev,
               init_deg=tuple(int(v) for v in args.init_deg.split(",")),
-              init_loc=args.init_loc, init_res=args.init_res, gate=args.gate)
+              init_loc=args.init_loc, init_res=args.init_res, gate=args.gate,
+              tsize=args.tsize)
     win.cap = args.casc_cap
     spath = args.ckpt.with_suffix(".jsonl") if args.ckpt else None
     r0 = 0

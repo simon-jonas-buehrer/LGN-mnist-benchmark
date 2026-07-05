@@ -32,12 +32,12 @@ for K in (3, 4, 6, 8):
     assert torch.equal(got, ref), f"LUT corner mismatch at K={K}"
     print(f"K={K}: hash executor == classic LUT address on {50*D} cells  OK")
 
-# ---- 2. every lever, both corners, exactness after each call ---------------------------
-for gate in ("lut", "ternary"):
+# ---- 2. every lever, all corners (incl. K>8 with small M), exactness after each call ----
+for gate, K, M in (("lut", 6, 0), ("ternary", 6, 0), ("hash", 6, 64), ("hash", 12, 64)):
     torch.manual_seed(1)
-    win = cd.Win(ci=3 * 4, hw=32, chs=[20, 10, 10], hws=[32, 32, 32], fan_in=6,
+    win = cd.Win(ci=3 * 4, hw=32, chs=[20, 10, 10], hws=[32, 32, 32], fan_in=K,
                  max_copies=1024, device=dev, init_deg=(0, 0, 0), init_loc=2,
-                 init_res=0.5, gate=gate)
+                 init_res=0.5, gate=gate, tsize=M)
     win.cap = 1 << 30
     D = 400
     X = (torch.rand(win.N, D) < 0.5).to(torch.uint8)
@@ -73,8 +73,8 @@ for gate in ("lut", "ternary"):
         assert hdrift < 1e-3, f"[{gate}] HVAL DESYNC at iter {it}: {hdrift}"
     total = sum(acc.values())
     zf = float((win.coef[win.alive] == 0).float().mean())
-    print(f"gate={gate:7s}: all levers exact over 8 iters, accepts={acc} "
-          f"hinge={win.hval / win.D:.4f} coef_zero={zf:.3f}  OK")
+    print(f"gate={gate:7s} K={K:2d} M={win.M:3d}: all levers exact over 8 iters, "
+          f"accepts={acc} hinge={win.hval / win.D:.4f} coef_zero={zf:.3f}  OK")
     assert acc["cf"] > 0, f"[{gate}] coef lever never accepted -- suspicious"
 
 print("\nALL HASH-GATE TESTS PASSED")
