@@ -107,6 +107,24 @@ Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
 - gen5 (queued): explore-anneal within the run (1:0.3:30 — pyrlong's late jump at r19
   suggests schedule shape matters) + r60 frontier run to locate the compounded wall.
 
+DEEP DIAGNOSIS (2026-07-05 night, scratch/analyze.py on the two best ckpts — the
+fundamental-issues pass, not just A/B):
+1. **Composition starvation**: cum-layer scores show L0+L1 (92% of gates) reach only 48.7
+   alone; L2+L3 (10k gates) add +5.7; L4+L5 (640 gates each after the taper) add ~+1 and
+   L5 is droppable at zero cost. Upper layers' taps bypass the middle (L5 reads 46% from
+   L1, 5-7% from L3/L4). The net is FUNCTIONALLY ~2.5 layers deep — no shape composition.
+   → gen7_fattop (80,40,40,40,40,40) gives composition layers 25x more capacity.
+2. **Errors are fine-grained animals**: cat 28, bird 31, deer 40 vs car 74/ship 73.
+   cat->dog/frog, bird->frog. Coarse color/edge stats solved; shape discrimination isn't.
+3. **Run diversity = big cheap headroom**: two same-recipe runs both-wrong on only 34.3%
+   (individual 45%) → vote-sum of 4 ckpts = **58.82 val** (+3.7 over best single; peak at
+   4, dilutes after). Binary nets ensemble natively (votes add) → scratch/merge.py
+   concatenates trained nets into ONE net (exact, validated) so CD can continue training
+   the union with cross-model rewiring. Oracle-of-2 bound: 65.7.
+4. **NOT the problem** (closed): gate death 0.7%, within-layer functional redundancy
+   |corr|=0.02-0.05 (signal collapse cleared at wiring AND function level), per-run
+   optimization (train 67+). Val margins razor-thin: median 0.14 tau, 11% wrong-confident.
+
 Late-evening verdicts (2026-07-05):
 - **FRONTIER r30**: gen3_ctrl30 (pyr+margin2) best val 54.88 @ r26 / ~54.7 @ r30, train
   only 67 (gap 12.1), 71 min. Day total: 50.1 → 54.9. margin4-on-pyr ≤ margin2 confirmed.
