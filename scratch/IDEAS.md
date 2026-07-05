@@ -49,8 +49,20 @@ fan-in down, revive = up), `--gate lut|ternary` init corners (lut = c_k=2^k, ver
 bit-exact vs the classic address in scratch/test_hash.py; ternary = signed-step tables).
 All levers exactness-tested at both corners (test_hash.py). No phases: cd-cf is one more
 bandit arm; per gate the learnables stay exactly (internal function = tt+coef, connections,
-sharing). STAGE 2 🔬 QUEUED: per-gate M growth/halving (T-duplicate = bit-identical) and
-K growth (new tap at c=0), both exactly neutral.
+sharing). STAGE 2a ✅ SHIPPED (same day): --tsize decouples table size M from tap budget K
+(K>8 with small tables; eval O(K), storage O(M)) + --gate hash init corner (c uniform in
+[1,M) → full-table occupancy). STAGE 2b 🔬 QUEUED: per-gate M growth/halving (T-duplicate
+= bit-identical) and K growth (new tap at c=0), both exactly neutral.
+
+hg1 A/B (2026-07-05, 6-layer 184k K=6, aug, r4-5 readout): ❌ TERNARY INIT REFUTED —
+val 39.6/38.5 (K6/K8) vs lut-corner 47.7; cause = dead capacity (c∈{−1,0,1} reaches only
+2K+1 of 2^K cells; tt accepts 1.5k/round vs 300k+). ✅ cd-cf VALIDATED as a lever from the
+lut corner: 24k accepted weight moves by r3, top-half bandit arm at layers 4-5, and ctrl
+reached val 47.7 by r4 (wave-2 needed ~2x the rounds). Lesson: init must occupy the full
+table; structure (threshold/hash regimes) must be EARNED by CD, never imposed at init.
+hg2 (running): hash init at M=64 with K=6/12/16, K=12 M=256, lut K=8 — does a bigger tap
+budget with constant table size pay? reg1 (running): spatial pyramid 32,32,16,16,8,8; cutout
+queued for backfill.
 Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
 of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
 symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —
