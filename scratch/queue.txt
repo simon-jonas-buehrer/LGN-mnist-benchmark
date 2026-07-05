@@ -1,2 +1,1 @@
-gen5_hcap3::--hinge-cap 3 --rounds 14
-gen5_crop6::--aug-crop 6 --rounds 14
+gen5_nb5::--num-bits 5 --rounds 14

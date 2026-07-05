@@ -113,9 +113,15 @@ Late-evening verdicts (2026-07-05):
 - ❌ hash INIT refuted at every corner tried (margin-1 AND margin-2 pyramid: gen4_hashfull
   slope collapsed at 49.7 @ r20, killed). The hash SUBSTRATE stays (cd-cf earns from the
   lut corner); the uniform-weight INIT is simply a worse basin.
-- 🔬 **GROW-AND-EARN promising**: gen4_grow8 (init-tsize 8) matches hashfull's round-parity
-  val while carrying ~1/8 the table bits, gap 3.6, steeper slope — learned capacity beats
-  fixed capacity at the same init corner so far; r30 tail pending.
+- **GROW-AND-EARN: mechanics ✅, basin ❌** (gen4_grow8, killed r18 at 49.2 vs frontier
+  ~54): capacity tracked demand exactly as designed (ms_mean 8.4→11.8, thousands of
+  earn-verified ops/round, no ratchet, gap 4-5) and BEAT fixed-full-capacity hash init
+  per bit at parity — but growth cannot rescue the hash corner's early optimization
+  deficit. Verdict: every non-lut INIT tried today loses the basin race; cd-ms machinery
+  stays shipped (exact, tested) awaiting a use that starts FROM the lut corner (e.g.
+  future coarse init at lut corner via tied tables, or capacity SHRINK pressure on a
+  trained lut net). Big picture: today's wins = lut corner + cd-cf refinement + margin +
+  geometry; every alternative init (ternary/hash/small-start) refuted.
 - ❌ width (2x channels) refuted at BOTH margins (−1.5 to −2 at parity, 2.6-2.9x cost).
 - deep8 (8-layer pyramid): weak null (−0.4 at parity, gap 8.5) — not compounded.
 - 🔬 jit6 (jitter 0.6): +0.4 at parity, gap 9.0 vs 12.1 — inside plausible seed noise, so
