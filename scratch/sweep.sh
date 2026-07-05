@@ -21,10 +21,8 @@ if (( $# > budget )); then
   echo "Submitting the first $budget; run the rest in a later sweep." >&2
   set -- "${@:1:budget}"
 fi
-# Shared config = wave-2 winners: fully-unshared deep 6-layer, 184k slots, K=6, 8-bit therm.
-BASE="--channels 80,40,20,20,10,10 --num-bits 8 --fan-in 6 --init-deg 0,0,0 \
---rs-temp 0.5 --explore 1:0.3:300 --aug full --aug-crop 4 --aug-jitter 0.3 \
---val-every 1 --pass-rows 2048 --rounds 14 --seed 0"
+# Shared config = wave-2 winners (scratch/base.env; also used by backfill.sh).
+source scratch/base.env
 for spec in "$@"; do
   name="${spec%%::*}"; extra="${spec#*::}"
   tag="${WAVE}_${name}"
