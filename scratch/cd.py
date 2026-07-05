@@ -120,8 +120,7 @@ class Win:
     def __init__(self, ci: int, hw: int, chs: list[int], hws: list[int], fan_in: int,
                  max_copies: int, device: str, init_deg: tuple[int, int, int] = (0, 0, 0),
                  init_loc: int = 0, init_res: float = 0.0, gate: str = "lut",
-                 tsize: int = 0, margin: float = 1.0, hinge_cap: float = 0.0,
-                 fanout_cap: int = 0):
+                 tsize: int = 0, margin: float = 1.0, hinge_cap: float = 0.0):
         assert len(hws) == len(chs) and all(c % CLS == 0 for c in chs)
         assert all(h & (h - 1) == 0 and 4 <= h <= hw for h in hws)   # powers of two
         self.init_loc, self.init_res, self.gate = init_loc, init_res, gate
@@ -149,7 +148,6 @@ class Win:
         self.max_copies = max_copies
         self.device = device
         self.cap = 1 << 30                                # cascade row budget (set by main)
-        self.fo_cap, self.fanout = fanout_cap, None       # filled after the wiring loop
         cum_c, cum_s = [0], [0]
         for c, h in zip(chs, hws):
             cum_c.append(cum_c[-1] + c)
@@ -196,13 +194,6 @@ class Win:
             g0 += ngl
         self._smask = torch.zeros(self.S, dtype=torch.bool, device=device)   # scratch
         self._sidx = torch.zeros(self.S, dtype=torch.long, device=device)    # scratch
-        # FAN-OUT CAP (anti signal-collapse): sources with >= cap gate-level tap references
-        # are masked out of NEW wiring proposals (rewire/rs/refills) -- hot signals can only
-        # lose readers, so concentration decays without a feasibility problem (measured on a
-        # trained net: median input bit had 28 readers, max 55 vs 20 under uniform wiring).
-        # Counts are per gate (copy shifts not expanded). 0 = off.
-        self.fanout = torch.bincount(self.conn[self.alive].long().flatten(),
-                                     minlength=self.N + self.S)
 
     def set_train(self, input_bits: torch.Tensor, y: torch.Tensor, rows: int = 2048) -> None:
         self.D = input_bits.shape[1]
@@ -272,48 +263,28 @@ class Win:
             tt[r] = sj[None] >= 1
         return tt, coef.remainder_(self.M).to(torch.int16)
 
-    def _fo_move(self, sub: torch.Tensor | None, add: torch.Tensor | None) -> None:
-        """Keep the gate-level fan-out counter in sync on connection writes."""
-        for t, s in ((sub, -1), (add, 1)):
-            if t is not None and t.numel():
-                self.fanout.index_add_(0, t.long().flatten(),
-                                       torch.full((t.numel(),), s, dtype=self.fanout.dtype,
-                                                  device=self.device))
-
     def _rand_conn(self, l: int, y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """Random taps for layer-l gates at spatial (y, x) (in layer-l grid units): uniform
         over all allowed sources, or -- with locality init -- within +-init_loc pixels of
         the gate's own position mapped into a random allowed source grid (the CNN locality
-        prior; rewiring can undo it wherever long range pays). With a fan-out cap, over-
-        subscribed sources are rejection-resampled a few rounds (soft: stragglers pass)."""
+        prior; rewiring can undo it wherever long range pays)."""
         n = y.numel()
-
-        def draw() -> torch.Tensor:
-            if not self.init_loc:
-                return torch.randint(self.N + int(self.cum_slots[l]), (n, self.K),
-                                     dtype=torch.int32, device=self.device)
-            offs = torch.cat([torch.zeros(1, dtype=torch.long, device=self.device),
-                              self.src_bound])
-            cgs = torch.cat([torch.tensor([self.Ci], device=self.device), self.chs_t])
-            hgs = torch.cat([torch.tensor([self.HWI], device=self.device), self.hws_t])
-            m = torch.randint(l + 1, (n, self.K), device=self.device)
-            off, cg, hg = offs[m], cgs[m], hgs[m]
-            c = (torch.rand(n, self.K, device=self.device) * cg).long()
-            r, hwl = self.init_loc, self.hws[l]
-            yy = (y[:, None] * hg // hwl
-                  + torch.randint(-r, r + 1, (n, self.K), device=self.device)) % hg
-            xx = (x[:, None] * hg // hwl
-                  + torch.randint(-r, r + 1, (n, self.K), device=self.device)) % hg
-            return (off + (c * hg + yy) * hg + xx).to(torch.int32)
-
-        out = draw()
-        if self.fo_cap and self.fanout is not None and n:
-            for _ in range(4):
-                bad = self.fanout[out.long()] >= self.fo_cap
-                if not bool(bad.any()):
-                    break
-                out = torch.where(bad, draw(), out)
-        return out
+        if not self.init_loc:
+            return torch.randint(self.N + int(self.cum_slots[l]), (n, self.K),
+                                 dtype=torch.int32, device=self.device)
+        offs = torch.cat([torch.zeros(1, dtype=torch.long, device=self.device),
+                          self.src_bound])
+        cgs = torch.cat([torch.tensor([self.Ci], device=self.device), self.chs_t])
+        hgs = torch.cat([torch.tensor([self.HWI], device=self.device), self.hws_t])
+        m = torch.randint(l + 1, (n, self.K), device=self.device)
+        off, cg, hg = offs[m], cgs[m], hgs[m]
+        c = (torch.rand(n, self.K, device=self.device) * cg).long()
+        r, hwl = self.init_loc, self.hws[l]
+        yy = (y[:, None] * hg // hwl
+              + torch.randint(-r, r + 1, (n, self.K), device=self.device)) % hg
+        xx = (x[:, None] * hg // hwl
+              + torch.randint(-r, r + 1, (n, self.K), device=self.device)) % hg
+        return (off + (c * hg + yy) * hg + xx).to(torch.int32)
 
     # -- coordinate helpers ----------------------------------------------------------------
     def _cyx(self, slot: torch.Tensor):
@@ -610,8 +581,6 @@ class Win:
             d = outs(cands[:, c]).float() - of.float()
             gain[:, c] = torch.zeros(g, device=self.device).index_add_(
                 0, rg, ((d > 0) * tu + (d < 0) * td).sum(1))
-        if self.fo_cap:                                              # over-subscribed sources
-            gain[self.fanout[cands] >= self.fo_cap] = float("inf")   # can't GAIN readers
         best, bi = gain.min(1)
         acc = best < -self.EPS
         if not int(acc.sum()):
@@ -623,7 +592,6 @@ class Win:
                 return 0
             rm = acc[rg]
             if self._commit(slot[rm], of[rm], nw[rm], -self.EPS, sw[rm], sw[rm]):
-                self._fo_move(self.conn[gid[acc], k[acc]], cands[acc, bi[acc]])
                 self.conn[gid[acc], k[acc]] = cands[acc, bi[acc]].to(torch.int32)
                 return n
             acc = acc & (torch.rand(g, device=self.device) >= 0.5)
@@ -765,12 +733,10 @@ class Win:
         if up:
             self.alive[ev] = False
             self.owner[slot_o] = g
-            self._fo_move(self.conn[ev], None)                       # evicted gates' taps
         if f:
             ids = (~self.alive).nonzero().flatten()[:f]
             self.base[ids] = freed.to(torch.int32)
             self.conn[ids], self.tt[ids], self.coef[ids] = conn_f, tt_f, coef_f
-            self._fo_move(None, conn_f)
             self.deg[ids] = 0
             self.step[ids] = 0
             self.sgn[ids] = 1
@@ -802,9 +768,6 @@ class Win:
         if int(rw.sum()):
             ks = torch.randint(self.K, (g,), device=self.device)
             near = self._near(conn_n[gr, ks].long(), radius, p_global, hi).to(torch.int32)
-            if self.fo_cap:                                          # over-cap: keep old tap
-                near = torch.where(self.fanout[near.long()] >= self.fo_cap,
-                                   conn_n[gr, ks], near)
             conn_n[gr[rw], ks[rw]] = near[rw]
         nm = ~rw
         if int(nm.sum()):
@@ -834,7 +797,6 @@ class Win:
             rm = acc[rg]
             ds = torch.zeros_like(self.score)
             ds.index_add_(0, rcls[rm], d[rm] * sw[rm][:, None])
-            self._fo_move(self.conn[gid[acc]], conn_n[acc])
             self.conn[gid[acc]] = conn_n[acc]
             self.tt[gid[acc]] = tt_n[acc]
             self.score += ds
@@ -846,7 +808,6 @@ class Win:
                 return 0
             rm = acc[rg]
             if self._commit(slot[rm], old[rm], nw[rm], thr, sw[rm], sw[rm]):
-                self._fo_move(self.conn[gid[acc]], conn_n[acc])
                 self.conn[gid[acc]] = conn_n[acc]
                 self.tt[gid[acc]] = tt_n[acc]
                 return n
@@ -895,7 +856,6 @@ class Win:
         self.tt[nid] = self.tt[g]
         self.coef[nid] = self.coef[g]
         self.sgn[nid] = self.sgn[g]
-        self._fo_move(None, self.conn[nid])                          # clone's baked taps
         self.deg[g, dim] -= 1
         self.step[g, dim] = (2 * st) % dimsz    # kept/clone copies: j*(2st) == (2j)*st
         self.deg[nid] = self.deg[g]
@@ -1069,7 +1029,6 @@ class Win:
             rm = rb[rg]
             if self._commit(slot[rm], old[rm], nw[rm], -self.EPS, sw[rm],
                             torch.ones_like(sw[rm])):
-                self._fo_move(self.conn[gid[rb]], conn_f[rb])
                 self.conn[gid[rb]] = conn_f[rb]
                 self.tt[gid[rb]] = tt_f[rb]
                 self.coef[gid[rb]] = coef_f[rb]
@@ -1082,15 +1041,11 @@ class Win:
     def check(self) -> float:
         """Max deviation between incremental state and a from-scratch pass: the score AND,
         with depth, every stored output row. Must be 0.0."""
-        fo = torch.bincount(self.conn[self.alive].long().flatten(),
-                            minlength=self.N + self.S)
-        fdrift = float((fo != self.fanout).sum().item())
         if self.L == 1:
-            return max(fdrift, (self.forward(self.src, self.D, self.rows)
-                                - self.score).abs().max().item())
+            return (self.forward(self.src, self.D, self.rows) - self.score).abs().max().item()
         src2 = self.src.clone()
         sc = self.forward(src2, self.D, self.rows)
-        return max(fdrift, (sc - self.score).abs().max().item(),
+        return max((sc - self.score).abs().max().item(),
                    float((src2 != self.src).sum().item()))
 
     def copy_stats(self) -> tuple[float, int, float]:
@@ -1156,12 +1111,6 @@ def main():
                         "(BitNet-style -- measured badly behind in hg1: only 2K+1 of M "
                         "cells reachable at init). Init only -- cd-cf moves every gate "
                         "freely in the space either way")
-    p.add_argument("--fanout-cap", type=int, default=0,
-                   help=">0: a source signal with this many gate-level readers is masked "
-                        "out of NEW wiring proposals (rewire/rs/refills) -- hot signals "
-                        "can only lose readers (anti signal-collapse diversity pressure). "
-                        "Trained nets measured median 28 readers per input bit, max 55. "
-                        "0 = off")
     p.add_argument("--margin", type=float, default=1.0,
                    help="hinge margin in tau units: samples exert pressure until "
                         "margin*tau votes ahead of the runner-up. >1 pushes train "
@@ -1268,8 +1217,7 @@ def main():
     win = Win(3 * args.num_bits, 32, chs, hws, args.fan_in, args.max_copies, dev,
               init_deg=tuple(int(v) for v in args.init_deg.split(",")),
               init_loc=args.init_loc, init_res=args.init_res, gate=args.gate,
-              tsize=args.tsize, margin=args.margin, hinge_cap=args.hinge_cap,
-              fanout_cap=args.fanout_cap)
+              tsize=args.tsize, margin=args.margin, hinge_cap=args.hinge_cap)
     win.cap = args.casc_cap
     spath = args.ckpt.with_suffix(".jsonl") if args.ckpt else None
     r0 = 0
@@ -1462,9 +1410,6 @@ def main():
                                                 minlength=win.TT + 1).tolist(),
                    "ttbit_ones": win.tt[al].long().sum(0).tolist(),
                    "coef_zero": round(float((win.coef[al] == 0).float().mean()), 4),
-                   "fo_max": int(win.fanout.max()),
-                   "fo_over": round(float((win.fanout >= max(1, win.fo_cap)).float().mean())
-                                    if win.fo_cap else 0.0, 4),
                    "gates": int(al.sum()),
                    "deg_mean": [round(v, 4) for v in win.deg[al].float().mean(0).tolist()],
                    "min": round((time.time() - t0) / 60, 1)}

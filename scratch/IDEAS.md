@@ -83,8 +83,15 @@ Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
 - 🔬 hash init (K6 M64): val 45.5 @ r6, ~3 pts behind lut init but gap 9.5 vs 21 and still
   climbing +1/round late — the regularized-capacity signature. K12/K16: slower starts,
   costlier rounds (16/27 min) — K16 likely too slow to justify unless its curve crosses.
-- 🔬 fanout-cap 6 (gen1_fo6): r3 ≈ ctrl exactly (46.4/19.2 gap vs 47.1/19.1) — cap only
-  blocks NEW concentration, effect (if any) should appear late as hot signals decay.
+- ❌ **FAN-OUT CAP REFUTED** (gen1 r8 finals, user's signal-collapse hypothesis): fo6 ended
+  48.9 (below ctrl 49.4), fo16 49.5 = noise; gaps unchanged (21-22). Concentration is REAL
+  (median input bit 28 readers, max 55 vs 20 uniform; hot signals ~all input bits) but
+  masking over-cap sources from new wiring bought nothing at the r8 horizon. Code deleted
+  same day (measurement + verdict preserved here).
+- ✅ **MARGIN 2 WON** (gen1_margin2): val 51.36 @ r8 / test 51.28 — +2.0 over ctrl at round
+  parity, beat ctrl's ENTIRE r14 run (50.48) in 8 rounds. Boosting-margin regularization
+  delivers; compounded into base.env together with the pyramid. Dose-response running
+  (margin4 @ r3: 49.2, gap 15.6 — best flat-geometry gap; margin8 launched).
 Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
 of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
 symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —
