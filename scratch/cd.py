@@ -120,7 +120,8 @@ class Win:
     def __init__(self, ci: int, hw: int, chs: list[int], hws: list[int], fan_in: int,
                  max_copies: int, device: str, init_deg: tuple[int, int, int] = (0, 0, 0),
                  init_loc: int = 0, init_res: float = 0.0, gate: str = "lut",
-                 tsize: int = 0, margin: float = 1.0, hinge_cap: float = 0.0):
+                 tsize: int = 0, margin: float = 1.0, hinge_cap: float = 0.0,
+                 init_tsize: int = 0):
         assert len(hws) == len(chs) and all(c % CLS == 0 for c in chs)
         assert all(h & (h - 1) == 0 and 4 <= h <= hw for h in hws)   # powers of two
         self.init_loc, self.init_res, self.gate = init_loc, init_res, gate
@@ -136,13 +137,21 @@ class Win:
         # table size M decouples from fan-in K: eval is O(K) unpacks, storage O(M) bits --
         # K is a TAP BUDGET (c=0 taps are inert), M an EXPRESSIVITY budget. --tsize 0
         # keeps the classic coupling M = 2**K (required for the lut corner's c_k = 2**k).
+        # M here is the CEILING; each gate has its own live table size msize[g] <= M
+        # (a power of two; cell = h mod msize). GROW (msize -> 2*msize, T duplicated) is
+        # bit-identical -- capacity appears exactly where later moves earn with it -- and
+        # SHRINK (halve when the two halves agree) is bit-identical too: expressivity is
+        # learned per gate, coarse-to-fine, priced by the bandit like everything else.
         self.K = fan_in
         self.M = self.TT = tsize if tsize else 1 << fan_in
+        self.ms0 = init_tsize if init_tsize else self.M   # fresh gates' live table size
         assert self.M <= 16384                            # 2M-2 must fit the int16 hash acc
+        assert self.ms0 <= self.M and self.ms0 >= 2 and self.ms0 & (self.ms0 - 1) == 0
         if gate == "lut":
             assert fan_in <= 8 and self.M == 1 << fan_in  # place values need the full table
+            assert self.ms0 == self.M                     # ...and every cell distinct
         if gate == "ternary":
-            assert self.M >= 2 * fan_in + 2               # signed sums must stay distinct
+            assert self.M >= 2 * fan_in + 2 and self.ms0 == self.M
         assert fan_in <= 8 or tsize                       # K>8 only with an explicit M
         self.tau = math.sqrt(self.S / CLS)
         self.max_copies = max_copies
@@ -168,6 +177,7 @@ class Win:
         self.base = torch.zeros(self.S, dtype=torch.int32, device=device)
         self.conn = torch.randint(self.N, (self.S, fan_in), dtype=torch.int32, device=device)
         self.tt, self.coef = self._rand_fn(self.S)
+        self.msize = torch.full((self.S,), self.ms0, dtype=torch.int16, device=device)
         self.deg = torch.zeros((self.S, 3), dtype=torch.int8, device=device)
         self.step = torch.zeros((self.S, 3), dtype=torch.int16, device=device)
         self.sgn = torch.ones(self.S, dtype=torch.int8, device=device)  # vote polarity
@@ -247,7 +257,9 @@ class Win:
                                device=self.device).bool()
             if self.init_res > 0 and n:
                 r = torch.rand(n, device=self.device) < self.init_res
-                c0 = coef[:, 0]
+                c0 = 1 + coef[:, 0] % (self.ms0 - 1) if self.ms0 > 2 else \
+                    torch.ones(n, dtype=torch.long, device=self.device)  # a live cell != 0
+                coef[r, 0] = c0[r]
                 coef[r, 1:] = 0
                 tt[r] = torch.arange(self.M, device=self.device)[None] == c0[r][:, None]
             return tt, coef.to(torch.int16)
@@ -338,17 +350,19 @@ class Win:
         kx = (kx + sx[:, None] * hg // hwl[:, None]) % hg
         return off + (kc * hg + ky) * hg + kx
 
-    def _cells(self, flat: torch.Tensor, coef: torch.Tensor, src: torch.Tensor,
-               d: int) -> torch.Tensor:
-        """(R, K) source coords + (R, K) hash weights -> (R, D) table cell per (row,
-        sample): cell = (sum_k c_k * x_k) mod M. The LUT corner (c_k = 2**k) reproduces
-        the classic K-bit address exactly; eval is O(K) adds whatever the table size, so
-        neither fan-in nor expressivity is tied to 2**K anymore. Weights are stored
-        canonically in [0, M) (-1 == M-1); the running remainder keeps the accumulator
-        tiny and overflow-free."""
+    def _cells(self, flat: torch.Tensor, coef: torch.Tensor, mg: torch.Tensor,
+               src: torch.Tensor, d: int) -> torch.Tensor:
+        """(R, K) source coords + (R, K) hash weights + (R,) live table sizes -> (R, D)
+        table cell per (row, sample): cell = (sum_k c_k * x_k) mod msize. The LUT corner
+        (c_k = 2**k, msize = 2**K) reproduces the classic K-bit address exactly; eval is
+        O(K) adds whatever the table size, so neither fan-in nor expressivity is tied to
+        2**K anymore. Weights are stored canonically in [0, M) (the CEILING, so growth
+        m -> 2m with T duplicated stays bit-identical); the per-row running remainder
+        keeps the accumulator tiny and overflow-free."""
+        m1 = mg.to(torch.int16)[:, None]
         acc = torch.zeros((flat.shape[0], d), dtype=torch.int16, device=self.device)
         for i in range(self.K):
-            acc.add_(coef[:, i:i + 1] * unpack_bits(src[flat[:, i]], d)).remainder_(self.M)
+            acc.add_(coef[:, i:i + 1] * unpack_bits(src[flat[:, i]], d)).remainder_(m1)
         return acc
 
     def _near(self, cur: torch.Tensor, radius: int, p_global: float, hi: int) -> torch.Tensor:
@@ -393,7 +407,7 @@ class Win:
             for seg in self._chunks(ids[lay == l], rows):
                 rg, slot, sc, sy, sx, hwl, _ = self._rows(seg)
                 cells = self._cells(self._shift(self.conn[seg].long()[rg], sc, sy, sx, hwl),
-                                    self.coef[seg][rg], src, d)
+                                    self.coef[seg][rg], self.msize[seg][rg], src, d)
                 out = self.tt[seg][rg].gather(1, cells.long())
                 score.index_add_(0, self._cls(slot),
                                  out.float() * self.sgn[seg].float()[rg, None])
@@ -493,7 +507,7 @@ class Win:
                         ok = False
                         break
                     out = self.tt[seg][rg[r]].gather(
-                        1, self._cells(taps[r], self.coef[seg][rg[r]], self.src, self.D).long())
+                        1, self._cells(taps[r], self.coef[seg][rg[r]], self.msize[seg][rg[r]], self.src, self.D).long())
                     rid = self.N + slot2[r]
                     df = pack_bits(out.to(torch.uint8)) ^ self.src[rid]
                     m2 = (df != 0).any(1)
@@ -523,7 +537,7 @@ class Win:
     def tt_sweep(self, gid: torch.Tensor) -> int:
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         cells = self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
-                            self.coef[gid][rg], self.src, self.D)
+                            self.coef[gid][rg], self.msize[gid][rg], self.src, self.D)
         cl = cells.long()
         ttg = self.tt[gid]
         o = ttg[rg].gather(1, cl)                                    # (R, D) current outputs
@@ -554,7 +568,7 @@ class Win:
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         hi = self.N + int(self.cum_slots[int(self._lay(gid[:1]))])   # sources below this layer
         flat = self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl)
-        cells = self._cells(flat, self.coef[gid][rg], self.src, self.D)
+        cells = self._cells(flat, self.coef[gid][rg], self.msize[gid][rg], self.src, self.D)
         ttg = self.tt[gid]
         of = ttg[rg].gather(1, cells.long())
         _, tup, tdn = self._base_tables()
@@ -565,8 +579,9 @@ class Win:
         td = torch.where(pos, tdn[rcls], tup[rcls])                  # the tables on neg rows
         k = torch.randint(self.K, (g,), device=self.device)
         ck = self.coef[gid, k][rg][:, None]                          # tap-k hash weight per row
+        mr = self.msize[gid][rg].to(torch.int16)[:, None]            # live table size per row
         xk = unpack_bits(self.src[flat.gather(1, k[rg][:, None]).squeeze(1)], self.D)
-        bas = (cells - ck * xk).remainder_(self.M)                   # hash with tap k removed
+        bas = (cells - ck * xk).remainder_(mr)                       # hash with tap k removed
         cands = torch.randint(hi, (g, n_cand), device=self.device)
         for c in range(int(n_cand * local_frac) if radius else 0):  # local candidates: same
             cands[:, c] = self._near(self.conn[gid, k].long(), radius, 0.0, hi)  # neighborhood
@@ -574,7 +589,7 @@ class Win:
         def outs(cand):                                              # cand (g,): per-row outputs
             fl = self._shift(cand[rg][:, None], sc, sy, sx, hwl)     # candidate coord, per copy
             cb = unpack_bits(self.src[fl[:, 0]], self.D)
-            return ttg[rg].gather(1, torch.remainder(bas + ck * cb, self.M).long())
+            return ttg[rg].gather(1, torch.remainder(bas + ck * cb, mr).long())
 
         gain = torch.empty((g, n_cand), device=self.device)
         for c in range(n_cand):
@@ -612,7 +627,7 @@ class Win:
         g = gid.numel()
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         flat = self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl)
-        cells = self._cells(flat, self.coef[gid][rg], self.src, self.D)
+        cells = self._cells(flat, self.coef[gid][rg], self.msize[gid][rg], self.src, self.D)
         ttg = self.tt[gid]
         of = ttg[rg].gather(1, cells.long())
         _, tup, tdn = self._base_tables()
@@ -623,8 +638,9 @@ class Win:
         td = torch.where(pos, tdn[rcls], tup[rcls])
         k = torch.randint(self.K, (g,), device=self.device)
         ck = self.coef[gid, k][rg][:, None]                          # current weight per row
+        mr = self.msize[gid][rg].to(torch.int16)[:, None]            # live table size per row
         xk = unpack_bits(self.src[flat.gather(1, k[rg][:, None]).squeeze(1)], self.D)
-        bas = (cells - ck * xk).remainder_(self.M)                   # hash with tap k removed
+        bas = (cells - ck * xk).remainder_(mr)                       # hash with tap k removed
         cur = self.coef[gid, k].long()[:, None]
         u = torch.rand(g, n_cand, device=self.device)
         pm = torch.randint(1, 4, (g, n_cand), device=self.device) \
@@ -637,7 +653,7 @@ class Win:
 
         def outs(cand):                                              # cand (g,): per-row outputs
             return ttg[rg].gather(
-                1, torch.remainder(bas + cand[rg][:, None] * xk, self.M).long())
+                1, torch.remainder(bas + cand[rg][:, None] * xk, mr).long())
 
         gain = torch.empty((g, n_cand), device=self.device)
         for c in range(n_cand):
@@ -659,6 +675,65 @@ class Win:
                 return n
             acc = acc & (torch.rand(g, device=self.device) >= 0.5)
         return 0
+
+    # -- lever: TABLE SIZE -- grow-and-earn / free-shrink the live table (learned M) -------
+    @torch.no_grad()
+    def msize_pass(self, gid: torch.Tensor) -> int:
+        """TABLE-SIZE moves, both exact. GROW-AND-EARN: tentatively double each visited
+        gate's live table (T duplicated = bit-identical), block-CD the doubled table like
+        tt_sweep, and keep the growth ONLY for gates where a flip package clears the
+        exact hinge -- expressivity is granted precisely where it immediately pays, never
+        on schedule, and the free duplicate alone is rejected so msize cannot ratchet up
+        for nothing. FREE SHRINK: halve any table whose two halves agree bit-for-bit
+        (behavior-identical even off-distribution, no test). With small --init-tsize this
+        makes per-gate capacity a LEARNED quantity: the net starts coarse and refines
+        only under measured demand -- the capacity analog of net2net splits."""
+        n_ops = 0
+        mg = self.msize[gid].long()
+        for m in torch.unique(mg).tolist():                          # free shrink
+            if m < 4:
+                continue
+            sel = gid[mg == m]
+            h = m // 2
+            agree = (self.tt[sel][:, :h] == self.tt[sel][:, h:m]).all(1)
+            if int(agree.sum()):
+                self.msize[sel[agree]] = h
+                n_ops += int(agree.sum())
+        gid = gid[self.msize[gid].long() * 2 <= self.M]              # grow candidates
+        if gid.numel() == 0:
+            return n_ops
+        rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
+        m2 = self.msize[gid].long() * 2
+        tt2 = self.tt[gid].clone()
+        for m in torch.unique(m2).tolist():                          # duplicate: T'[j+m/2]=T[j]
+            sel = m2 == m
+            tt2[sel, m // 2:m] = tt2[sel, :m // 2]
+        cells = self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
+                            self.coef[gid][rg], m2[rg], self.src, self.D)
+        cl = cells.long()
+        o = tt2[rg].gather(1, cl)                                    # == current outputs
+        _, tup, tdn = self._base_tables()
+        rcls = self._cls(slot)
+        sw = self.sgn[gid].float()[rg]
+        neg = (self.sgn[gid] < 0)[rg, None]
+        dlt = torch.where(o ^ neg, tdn[rcls], tup[rcls])
+        ben = torch.zeros(gid.numel() * self.TT, device=self.device)
+        ben.scatter_add_(0, (cl + (rg * self.TT)[:, None]).flatten(), dlt.flatten())
+        flip = ben.view(-1, self.TT) < -self.EPS
+        for _ in range(6):
+            grew = flip.any(1)                                       # growth must EARN
+            n = int(grew.sum())
+            if n == 0:
+                return n_ops
+            ttn = tt2 ^ flip
+            rm = grew[rg]
+            if self._commit(slot[rm], o[rm], ttn[rg].gather(1, cl)[rm], -self.EPS,
+                            sw[rm], sw[rm]):
+                self.tt[gid[grew]] = ttn[grew]
+                self.msize[gid[grew]] = m2[grew].to(torch.int16)
+                return n_ops + n
+            flip[torch.rand(gid.numel(), device=self.device) < 0.5] = False
+        return n_ops
 
     # -- lever 3: share/unshare a gate along one dimension (evict / refill, exact accept) --
     @torch.no_grad()
@@ -694,13 +769,13 @@ class Win:
         o_g = self.tt[g][self._cells(self._shift(self.conn[gid].long()[rg[odd]], sc[odd],
                                                  sy[odd], sx[odd], hwl[odd]),
                                      self.coef[gid][rg[odd]],
-                                     self.src, self.D).long()]       # g's outputs on those slots
+                                     self.msize[gid][rg[odd]], self.src, self.D).long()]       # g's outputs on those slots
         if up:                                                       # evict the current owners
             ev = torch.unique(self.owner[slot_o].long())
             erg, eslot, esc, esy, esx, ehw, _ = self._rows(ev)
             eout = self.tt[ev][erg].gather(
                 1, self._cells(self._shift(self.conn[ev].long()[erg], esc, esy, esx, ehw),
-                               self.coef[ev][erg], self.src, self.D).long())
+                               self.coef[ev][erg], self.msize[ev][erg], self.src, self.D).long())
             self._smask[slot_o] = True
             tk = self._smask[eslot]                                  # eslot rows taken by g
             self._smask[slot_o] = False
@@ -720,7 +795,9 @@ class Win:
         _, _, fy, fx, _ = self._cyx(freed)
         conn_f = self._rand_conn(l, fy, fx)
         tt_f, coef_f = self._rand_fn(f)
-        fout = tt_f.gather(1, self._cells(conn_f.long(), coef_f, self.src, self.D).long()) \
+        ms_f = torch.full((f,), self.ms0, dtype=torch.int16, device=self.device)
+        fout = tt_f.gather(1, self._cells(conn_f.long(), coef_f, ms_f,
+                                          self.src, self.D).long()) \
             if f else o_g[:0]                                        # fresh unshared randoms
         if up:
             nw[~tk] = fout
@@ -737,6 +814,7 @@ class Win:
             ids = (~self.alive).nonzero().flatten()[:f]
             self.base[ids] = freed.to(torch.int32)
             self.conn[ids], self.tt[ids], self.coef[ids] = conn_f, tt_f, coef_f
+            self.msize[ids] = self.ms0
             self.deg[ids] = 0
             self.step[ids] = 0
             self.sgn[ids] = 1
@@ -771,15 +849,16 @@ class Win:
             conn_n[gr[rw], ks[rw]] = near[rw]
         nm = ~rw
         if int(nm.sum()):
+            mgi = self.msize[gid].long()                             # only flip LIVE cells
             for _ in range(max(1, n_bits)):
-                kb = torch.randint(self.TT, (g,), device=self.device)
+                kb = torch.randint(self.TT, (g,), device=self.device) % mgi
                 tt_n[gr[nm], kb[nm]] ^= True
         old = self.tt[gid][rg].gather(
             1, self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
-                           self.coef[gid][rg], self.src, self.D).long())
+                           self.coef[gid][rg], self.msize[gid][rg], self.src, self.D).long())
         nw = tt_n[rg].gather(
             1, self._cells(self._shift(conn_n.long()[rg], sc, sy, sx, hwl),
-                           self.coef[gid][rg], self.src, self.D).long())
+                           self.coef[gid][rg], self.msize[gid][rg], self.src, self.D).long())
         d = nw.float() - old.float()
         _, tup, tdn = self._base_tables()
         rcls = self._cls(slot)
@@ -855,6 +934,7 @@ class Win:
                                      s if dim == 2 else z, hwt)[0].to(torch.int32)
         self.tt[nid] = self.tt[g]
         self.coef[nid] = self.coef[g]
+        self.msize[nid] = self.msize[g]
         self.sgn[nid] = self.sgn[g]
         self.deg[g, dim] -= 1
         self.step[g, dim] = (2 * st) % dimsz    # kept/clone copies: j*(2st) == (2j)*st
@@ -881,7 +961,7 @@ class Win:
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         old = self.tt[gid][rg].gather(
             1, self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
-                           self.coef[gid][rg], self.src, self.D).long())
+                           self.coef[gid][rg], self.msize[gid][rg], self.src, self.D).long())
         d3 = torch.multinomial((self.deg[gid] > 0).float(), 1).flatten()
         lay = self._lay(gid)
         dimsz = torch.where(d3 == 0, self.chs_t[lay], self.hws_t[lay])
@@ -896,7 +976,7 @@ class Win:
         rg2, _, sc2, sy2, sx2, hwl2, _ = self._rows(gid)             # same rows, new shifts
         nw = self.tt[gid][rg2].gather(
             1, self._cells(self._shift(self.conn[gid].long()[rg2], sc2, sy2, sx2, hwl2),
-                           self.coef[gid][rg2], self.src, self.D).long())
+                           self.coef[gid][rg2], self.msize[gid][rg2], self.src, self.D).long())
         self.step[gid, d3] = cur.to(torch.int16)                     # decide, then write
         sw = self.sgn[gid].float()[rg]
         acc = torch.ones(g, dtype=torch.bool, device=self.device)
@@ -922,7 +1002,7 @@ class Win:
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         out = self.tt[gid][rg].gather(
             1, self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
-                           self.coef[gid][rg], self.src, self.D).long())
+                           self.coef[gid][rg], self.msize[gid][rg], self.src, self.D).long())
         _, tup, tdn = self._base_tables()
         rcls = self._cls(slot)
         sw = self.sgn[gid].float()[rg]
@@ -955,7 +1035,7 @@ class Win:
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         out = self.tt[gid][rg].gather(
             1, self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
-                           self.coef[gid][rg], self.src, self.D).long())
+                           self.coef[gid][rg], self.msize[gid][rg], self.src, self.D).long())
         outf = out.float()
         _, tup, tdn = self._base_tables()
         rcls = self._cls(slot)                                       # current class per copy
@@ -1003,7 +1083,7 @@ class Win:
         rg, slot, sc, sy, sx, hwl, _ = self._rows(gid)
         old = self.tt[gid][rg].gather(
             1, self._cells(self._shift(self.conn[gid].long()[rg], sc, sy, sx, hwl),
-                           self.coef[gid][rg], self.src, self.D).long())
+                           self.coef[gid][rg], self.msize[gid][rg], self.src, self.D).long())
         _, tup, tdn = self._base_tables()
         rcls = self._cls(slot)
         sw = self.sgn[gid].float()[rg]
@@ -1019,9 +1099,10 @@ class Win:
             m = lay == l
             conn_f[m] = self._rand_conn(int(l), by[m], bx[m])
         tt_f, coef_f = self._rand_fn(gid.numel())
+        ms_f = torch.full((gid.numel(),), self.ms0, dtype=torch.int16, device=self.device)
         nw = tt_f[rg].gather(
             1, self._cells(self._shift(conn_f.long()[rg], sc, sy, sx, hwl),
-                           coef_f[rg], self.src, self.D).long())
+                           coef_f[rg], ms_f[rg], self.src, self.D).long())
         for _ in range(6):
             n = int(rb.sum())
             if n == 0:
@@ -1032,6 +1113,7 @@ class Win:
                 self.conn[gid[rb]] = conn_f[rb]
                 self.tt[gid[rb]] = tt_f[rb]
                 self.coef[gid[rb]] = coef_f[rb]
+                self.msize[gid[rb]] = self.ms0
                 self.sgn[gid[rb]] = 1
                 return n
             rb = rb & (torch.rand(gid.numel(), device=self.device) >= 0.5)
@@ -1120,6 +1202,11 @@ def main():
                    help=">0: per-sample hinge saturates here (ramp loss) -- hopeless "
                         "samples stop dominating the optimization pressure; a robust-"
                         "loss regularizer. 0 = off")
+    p.add_argument("--init-tsize", type=int, default=0,
+                   help="fresh gates' LIVE table size (power of 2, <= tsize ceiling; 0 = "
+                        "full). Small values start every gate coarse; cd-ms grows tables "
+                        "2x where flips immediately pay (grow-and-earn) and halves them "
+                        "for free where halves agree -- per-gate capacity is learned")
     p.add_argument("--tsize", type=int, default=0,
                    help="table size M per gate (0 = 2**fan_in, the classic coupling). "
                         "Decoupling M from K breaks the K<=8 LUT barrier: eval O(K), "
@@ -1217,14 +1304,15 @@ def main():
     win = Win(3 * args.num_bits, 32, chs, hws, args.fan_in, args.max_copies, dev,
               init_deg=tuple(int(v) for v in args.init_deg.split(",")),
               init_loc=args.init_loc, init_res=args.init_res, gate=args.gate,
-              tsize=args.tsize, margin=args.margin, hinge_cap=args.hinge_cap)
+              tsize=args.tsize, margin=args.margin, hinge_cap=args.hinge_cap,
+              init_tsize=args.init_tsize)
     win.cap = args.casc_cap
     spath = args.ckpt.with_suffix(".jsonl") if args.ckpt else None
     r0 = 0
     if args.resume and args.ckpt and args.ckpt.exists():
         ck = torch.load(args.ckpt, map_location=dev)
-        for k in ("base", "conn", "tt", "coef", "deg", "alive", "owner", "step", "sgn",
-                  "ocls"):                       # old ckpts lack coef -> keep the 2**k init
+        for k in ("base", "conn", "tt", "coef", "msize", "deg", "alive", "owner", "step",
+                  "sgn", "ocls"):                       # old ckpts lack coef -> keep the 2**k init
             if k in ck:
                 getattr(win, k).copy_(ck[k])
         r0 = ck["round"]
@@ -1270,7 +1358,8 @@ def main():
     # hinge decrease per second); persists across rounds (bandit memory). With depth each
     # chunk operator becomes one arm PER LAYER, so the bandit also learns which layers are
     # currently worth their (cascade) cost.
-    CHOPS = ("cd-tt", "cd-cn", "cd-cf", "cd-st", "cd-sg", "cd-cl", "cd-rb", "rs-cn", "rs-tt")
+    CHOPS = ("cd-tt", "cd-cn", "cd-cf", "cd-ms", "cd-st", "cd-sg", "cd-cl", "cd-rb", "rs-cn",
+             "rs-tt")
     OPS = tuple(f"{o}@{l}" for o in CHOPS for l in range(win.L)) + ("cd-sh", "rs-sh", "sp")
     opq = dict.fromkeys(OPS, 0.0)
     exs = [float(v) for v in args.explore.split(":")]
@@ -1355,6 +1444,8 @@ def main():
                     cnt[op] += win.rewire(seg, args.n_cand, args.rs_radius, args.local_frac)
                 elif o == "cd-cf":
                     cnt[op] += win.coef_pass(seg, args.n_cand)
+                elif o == "cd-ms":
+                    cnt[op] += win.msize_pass(seg)
                 elif o == "cd-st":
                     cnt[op] += win.step_pass(seg)
                 elif o == "cd-sg":
@@ -1376,15 +1467,15 @@ def main():
         agg = {o: sum(v for k, v in cnt.items() if k.split("@")[0] == o) for o in CHOPS}
         bits, rews = agg["cd-tt"], agg["cd-cn"]
         shares = cnt["cd-sh"]
-        rsa = agg["rs-cn"] + agg["rs-tt"] + agg["cd-cf"] + agg["cd-st"] + agg["cd-sg"] \
+        rsa = agg["rs-cn"] + agg["rs-tt"] + agg["cd-cf"] + agg["cd-ms"] + agg["cd-st"] + agg["cd-sg"] \
             + agg["cd-cl"] + agg["cd-rb"] + cnt["rs-sh"] + cnt["sp"]
         va = te = float("nan")
         if rnd % args.val_every == 0:
             va, te = win.evaluate(Xva, vy, args.pass_rows), win.evaluate(Xte, ey, args.pass_rows)
             if args.ckpt:
                 torch.save({k: getattr(win, k).cpu() for k in
-                            ("base", "conn", "tt", "coef", "deg", "alive", "owner", "step",
-                             "sgn", "ocls")}
+                            ("base", "conn", "tt", "coef", "msize", "deg", "alive", "owner",
+                             "step", "sgn", "ocls")}
                            | {"round": rnd, "args": vars(args)}, args.ckpt)
         mc, xc, sf = win.copy_stats()
         print(f"{rnd:>5} | {bits:>9} | {rews:>8} | {shares:>6} | {rsa:>5} | {mc:5.2f} | "
@@ -1398,7 +1489,8 @@ def main():
                    "test": None if te != te else round(te, 2),
                    "hinge": round(win.hval / win.D, 4),
                    "ttbits": bits, "rewires": rews, "shares": shares, "rs": rsa,
-                   "coefs": agg["cd-cf"], "steps": agg["cd-st"], "signs": agg["cd-sg"],
+                   "coefs": agg["cd-cf"], "msizes": agg["cd-ms"],
+                   "steps": agg["cd-st"], "signs": agg["cd-sg"],
                    "clsmoves": agg["cd-cl"],
                    "rebuilds": agg["cd-rb"], "explore": round(e, 3),
                    "op_n": nun, "op_q": {k: round(v, 3) for k, v in opq.items()},
@@ -1410,6 +1502,7 @@ def main():
                                                 minlength=win.TT + 1).tolist(),
                    "ttbit_ones": win.tt[al].long().sum(0).tolist(),
                    "coef_zero": round(float((win.coef[al] == 0).float().mean()), 4),
+                   "ms_mean": round(float(win.msize[al].float().mean()), 2),
                    "gates": int(al.sum()),
                    "deg_mean": [round(v, 4) for v in win.deg[al].float().mean(0).tolist()],
                    "min": round((time.time() - t0) / 60, 1)}
