@@ -41,6 +41,40 @@ learned-fan-in-inside-TT lever, macro-gate init as a special concept, K as seman
 (substrate K=2; K=6 kept only as A/B arm at matched unrolled budget), hand-tapered channel
 pyramids as default.
 
+### v3 (same day): THE HASH GATE — one gate type subsumes all function families.
+STAGE 1 ✅ SHIPPED (2026-07-05, this commit): fixed M=2**K substrate — `coef` (S,K) int16
+hash weights, `_cells` = unpack-mul-accumulate-mod, rewire's shifted-gather generalized
+(bas = h − c_k·x_k mod M), new `cd-cf` lever (block-scores candidate weights; c'=0 = learned
+fan-in down, revive = up), `--gate lut|ternary` init corners (lut = c_k=2^k, verified
+bit-exact vs the classic address in scratch/test_hash.py; ternary = signed-step tables).
+All levers exactness-tested at both corners (test_hash.py). No phases: cd-cf is one more
+bandit arm; per gate the learnables stay exactly (internal function = tt+coef, connections,
+sharing). STAGE 2 🔬 QUEUED: per-gate M growth/halving (T-duplicate = bit-identical) and
+K growth (new tap at c=0), both exactly neutral.
+Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
+of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
+symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —
+init here, let CD earn the hashing regime); small M = compressed hash gate. EXACT
+neutrality of all growth: new tap enters with c=0 (inert, test-free — supersedes the
+"add as MSB" idea: under mod, MSB placement is dead for M=2^m and not minimal-influence
+otherwise); M→2M with T duplicated (T'[j]=T[j mod M]) is bit-identical (h mod 2M ∈
+{h, h+M}, both read T[h]); halve-M when halves agree = coarsening. Fan-in AND expressivity
+(table size) are learned per group, storage O(M) never 2^fanin, eval O(K) — breaks the
+K≤8 executor barrier. Block-CD survives verbatim (buckets partition rows → scatter-add
+proposes all M bits at once); rewire's shifted-gather trick survives (h_base = h − c_k·x_k)
+and also block-scores candidate c values (new cheap lever). Executor change = _cells only:
+unpack-OR-shift → unpack-mul-accumulate-mod. Prior art (searched 2026-07-05): Bloom
+WiSARD (hash tables replace RAM-node TTs, ~6 orders memory reduction, arxiv 2203.01479 +
+ESANN 2019); DWN differentiable weightless nets (ICML 2024, arxiv 2410.11112 — same model
+class, SGD-trained, no learned hash/growth); HashedNets (arxiv 1504.04788 — random
+collision-tying is benign); Instant-NGP multiresolution hash encoding (arxiv 2201.05989 —
+collisions disambiguated ACROSS resolutions: several gates at different M reading the same
+taps disambiguate each other; our voting head already averages). Novel combination: exact
+discrete CD on hash weights + exactly-neutral fan-in/table growth + hierarchical tying.
+Risks: wraparound destroys monotone structure (init no-wrap); small-M aliasing escapable
+only via M-growth (measure accept rates early); avoid M=2^m with c=2^k-style dead bits
+(prime/odd M or odd multipliers).
+
 Original design notes (machinery below remains valid):
 Design decision: **the hierarchy lives in the OPTIMIZER, not the executor.** The executable
 net stays what cd.py is (materialized fan-in-K LUT slots, bitpacked, cascade, exact-hinge
