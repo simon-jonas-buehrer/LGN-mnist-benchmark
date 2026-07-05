@@ -77,7 +77,8 @@ def remap_slots(m, slots, cum_m):
     return out
 
 new = {k: [] for k in ("base", "conn", "tt", "coef", "msize", "deg", "step", "sgn",
-                       "ocls", "alive", "owner")}
+                       "alive")}
+ocls = torch.empty(S, dtype=torch.int8)                          # ocls is SLOT-indexed
 order = torch.empty(0, dtype=torch.long)
 for m, ck in enumerate(cks):
     cum_m = cums(chs[m])
@@ -86,19 +87,20 @@ for m, ck in enumerate(cks):
     inp = conn < N
     conn = torch.where(inp, conn, N + remap_slots(m, (conn - N).clamp(min=0), cum_m))
     base = remap_slots(m, ck["base"].long(), cum_m)
-    # gate arrays are slot-aligned (unshared): reorder into merged slot order later
+    # gate-indexed arrays: reorder into merged slot order later (via base)
     new["conn"].append(conn.to(torch.int32))
     new["base"].append(base.to(torch.int32))
-    for k in ("tt", "coef", "msize", "deg", "step", "sgn", "ocls", "alive"):
+    for k in ("tt", "coef", "msize", "deg", "step", "sgn", "alive"):
         if k in ck:
             new[k].append(ck[k])
         elif k == "msize":
             new[k].append(torch.full((Sm,), ck["tt"].shape[1], dtype=torch.int16))
+    ocls[remap_slots(m, torch.arange(Sm), cum_m)] = ck["ocls"]   # slot -> merged slot
     order = torch.cat([order, base])
 
 perm = order.argsort()                                            # merged-slot order
-out = {}
-for k in ("conn", "tt", "coef", "msize", "deg", "step", "sgn", "ocls", "alive"):
+out = {"ocls": ocls}
+for k in ("conn", "tt", "coef", "msize", "deg", "step", "sgn", "alive"):
     out[k] = torch.cat(new[k])[perm]
 out["base"] = torch.cat(new["base"])[perm]
 own = torch.empty(S, dtype=torch.int32)
