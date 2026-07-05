@@ -106,6 +106,21 @@ Same-day verdicts (r3-r12 readouts, 2026-07-05 evening):
   (~2 pts, 2.6x cost) — capacity-via-width keeps losing to capacity-via-margin/geometry.
 - gen5 (queued): explore-anneal within the run (1:0.3:30 — pyrlong's late jump at r19
   suggests schedule shape matters) + r60 frontier run to locate the compounded wall.
+
+Late-evening verdicts (2026-07-05):
+- **FRONTIER r30**: gen3_ctrl30 (pyr+margin2) best val 54.88 @ r26 / ~54.7 @ r30, train
+  only 67 (gap 12.1), 71 min. Day total: 50.1 → 54.9. margin4-on-pyr ≤ margin2 confirmed.
+- ❌ hash INIT refuted at every corner tried (margin-1 AND margin-2 pyramid: gen4_hashfull
+  slope collapsed at 49.7 @ r20, killed). The hash SUBSTRATE stays (cd-cf earns from the
+  lut corner); the uniform-weight INIT is simply a worse basin.
+- 🔬 **GROW-AND-EARN promising**: gen4_grow8 (init-tsize 8) matches hashfull's round-parity
+  val while carrying ~1/8 the table bits, gap 3.6, steeper slope — learned capacity beats
+  fixed capacity at the same init corner so far; r30 tail pending.
+- ❌ width (2x channels) refuted at BOTH margins (−1.5 to −2 at parity, 2.6-2.9x cost).
+- deep8 (8-layer pyramid): weak null (−0.4 at parity, gap 8.5) — not compounded.
+- 🔬 jit6 (jitter 0.6): +0.4 at parity, gap 9.0 vs 12.1 — inside plausible seed noise, so
+  a 2x2 (arm x seed) replica set is running before any compounding (methodology upgrade:
+  all prior single-seed margins > 1.5 pts, this one isn't).
 Gate = `T[(Σ_k c_k·x_k) mod M]`: K taps, learned integer weights c_k, learned bit-table T
 of size M. Corners: c=2^k, M=2^K = full LUT (today's gate, exactly); c∈{0,1}, no wrap =
 symmetric; c∈{−1,0,1} + step T, no wrap = BitNet ternary threshold (the stable corner —

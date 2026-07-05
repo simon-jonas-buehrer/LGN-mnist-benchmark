@@ -1,1 +1,2 @@
-gen5_long60::--rounds 60
+gen5_hcap3::--hinge-cap 3 --rounds 14
+gen5_crop6::--aug-crop 6 --rounds 14
