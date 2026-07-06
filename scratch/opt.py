@@ -23,8 +23,15 @@ learned method-natively:
     rs   candidate re-draws mutate jointly WITH truth-table bit flips (one genome mutation)
     mab  a categorical policy over the k candidates per tap, REINFORCE update
 
-Truth-table initialization: bp and mab hold real latents ~ N(0, 1) (Gaussian); cd and rs
-hold hard bits ~ Bernoulli(0.5). The x-axis of every learning curve is SAMPLES SEEN: each
+Truth-table initialization (--res-init 1, default): RESIDUAL initialization after
+arXiv:2510.03250 -- every gate starts as a PASS-THROUGH of its tap 0 (the monarch
+residual connection), so signal flows through depth from step 0 and sign-symmetry is
+broken. Method-natively: cd and rs get the exact pass-through table T[cell] = cell & 1;
+bp is only BIASED toward it (deterministic latents +-RES_BP around the sin bit, plus tiny
+noise), since the relaxation must keep gradients; mab's Bernoulli policy logits are set
+to +-RES_MAB (sigmoid ~ 0.99 toward the pass-through bit), the policy analog of the
+paper's logit-5 bias. --res-init 0 falls back to Gaussian latents (bp, mab) /
+Bernoulli(0.5) tables (cd, rs). The x-axis of every learning curve is SAMPLES SEEN: each
 forward of a training batch of B images costs B (partial recomputes from layer l cost
 B * (L - l) / L). Every method logs train/val loss, accuracy and perplexity to
 <out>.jsonl and checkpoints to <out>.pt at every eval (and finally with test metrics).
@@ -54,6 +61,14 @@ from train import load_cifar10  # noqa: E402
 
 CLS = 10
 TOPO_SEED = 0  # wiring + candidate sources: identical for every method, always
+RES_BP = 1.2   # bp residual bias on the sin latent: soft bit ~ 0.97 toward pass-through
+RES_MAB = 5.0  # mab residual bias on the Bernoulli policy logit (sigmoid(5) ~ 0.993),
+               # the strength used for the gate logits in arXiv:2510.03250
+
+
+def res_pattern(fan_in: int) -> torch.Tensor:
+    """(2**fan_in,) bool: the truth table of 'pass through tap 0' (cell bit 0)."""
+    return (torch.arange(1 << fan_in) & 1).bool()
 
 
 # ==========================================================================================
@@ -155,7 +170,7 @@ class BPNet(nn.Module):
     same boolean-circuit family as the hard executor -- only the gradients are soft."""
 
     def __init__(self, cands: list[torch.Tensor], fan_in: int, k: int, learn_conn: bool,
-                 gen: torch.Generator):
+                 gen: torch.Generator, res_init: bool):
         super().__init__()
         self.L, self.fan_in, self.k, self.learn_conn = len(cands), fan_in, k, learn_conn
         self.theta = nn.ParameterList()
@@ -163,7 +178,12 @@ class BPNet(nn.Module):
         for l, cand in enumerate(cands):
             self.register_buffer(f"cand{l}", cand)
             n = cand.shape[0]
-            self.theta.append(nn.Parameter(torch.randn(n, 1 << fan_in, generator=gen)))
+            if res_init:  # biased toward the tap-0 pass-through table (residual init)
+                t = RES_BP * (res_pattern(fan_in).float() * 2 - 1).expand(n, -1) \
+                    + 0.05 * torch.randn(n, 1 << fan_in, generator=gen)
+            else:
+                t = torch.randn(n, 1 << fan_in, generator=gen)
+            self.theta.append(nn.Parameter(t))
             if learn_conn:
                 a = torch.randn(n, fan_in, k, generator=gen)
                 a[:, :, 0] += 4.0  # start at the monarch tap, like everyone else
@@ -307,7 +327,8 @@ class Bench:
 def train_bp(b: Bench) -> None:
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
-    model = BPNet(b.cands, args.fan_in, args.k, bool(args.learn_conn), gen).to(b.dev)
+    model = BPNet(b.cands, args.fan_in, args.k, bool(args.learn_conn), gen,
+                  bool(args.res_init)).to(b.dev)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     print(f"bp params: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
@@ -345,9 +366,14 @@ def train_bp(b: Bench) -> None:
 # Hard-state helpers (cd / rs / mab share the executor)
 # ==========================================================================================
 def bern_state(b: Bench, gen: torch.Generator) -> tuple[list, list, list]:
-    """Bernoulli(0.5) truth tables + monarch selection (candidate 0 everywhere)."""
-    tts = [(torch.rand(w, 16, generator=gen) < 0.5).to(torch.uint8).to(b.dev)
-           for w in b.widths]
+    """Truth tables (exact tap-0 pass-through with --res-init, else Bernoulli(0.5)) +
+    monarch selection (candidate 0 everywhere)."""
+    if b.args.res_init:
+        pat = res_pattern(b.args.fan_in).to(torch.uint8).to(b.dev)
+        tts = [pat.expand(w, -1).clone() for w in b.widths]
+    else:
+        tts = [(torch.rand(w, 16, generator=gen) < 0.5).to(torch.uint8).to(b.dev)
+               for w in b.widths]
     sels = [torch.zeros(w, b.args.fan_in, dtype=torch.int64, device=b.dev)
             for w in b.widths]
     conns = [sel_to_conn(c, s) for c, s in zip(b.cands, sels)]
@@ -501,7 +527,11 @@ def train_mab(b: Bench) -> None:
     argmax) is what gets evaluated and checkpointed."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
-    thetas = [torch.randn(w, 16, generator=gen).to(b.dev) for w in b.widths]
+    if args.res_init:  # policy starts ~sigmoid(5) certain of the pass-through bit
+        pat = RES_MAB * (res_pattern(args.fan_in).float() * 2 - 1)
+        thetas = [pat.expand(w, -1).clone().to(b.dev) for w in b.widths]
+    else:
+        thetas = [torch.randn(w, 16, generator=gen).to(b.dev) for w in b.widths]
     alphas = [torch.randn(w, args.fan_in, args.k, generator=gen).to(b.dev)
               for w in b.widths]
     for a in alphas:
@@ -569,6 +599,10 @@ def main():
                    help="nodes per layer ('64K'; divisible by 10 classes and 256 groups)")
     p.add_argument("--fan-in", type=int, default=4)
     p.add_argument("--k", type=int, default=8, help="candidate sources per tap")
+    p.add_argument("--res-init", type=int, default=1,
+                   help="1: residual init (arXiv:2510.03250) -- every gate starts as a "
+                        "pass-through of tap 0 (exact for cd/rs, biased latents for bp, "
+                        "biased policy for mab); 0: random init")
     p.add_argument("--crop", type=int, default=4, help="augmentation crop padding")
     p.add_argument("--batch", type=int, default=0, help="0 = per-method default")
     p.add_argument("--max-samples", type=float, default=100e6)
