@@ -142,6 +142,13 @@ OVERNIGHT (2026-07-06 early): **50.1 -> 64.9 in one day.**
   fattop). Lesson: re-verify compounded winners when the context they were measured in
   changes.
 - Pre-edge recipe asymptote CLOSED at ~56 (long60 r57, ann60 r60, front replicas).
+- gen8 decoupling verdicts: nb5-with-edge = TIE with nb8 (62.06 vs ~62.1 @ r14) → nb5
+  REVERTED from BASE (no gain, and one bad interaction observed); ❌ FATTOP NULL at r14
+  (61.96 vs ~62.1) — 25x more top-layer capacity goes UNUSED at this horizon, so the
+  composition deficit is not raw capacity; needs a structural mechanism (macro-features /
+  much longer horizons / different wiring priors), not wider top layers.
+- big3x ~65.0 plateau forming (r48-53); big3x_s1 (seed 1) launched as 2nd big merge
+  parent; edge-gen merge planned: big3x + big3x_s1 + edge replicas → CD continue.
 - ❌ noshare knockout run invalidated by budget coupling (share budgets fund ALL arms via
   the sampler); rerun with --work-frac 6.5 compensation (gen7_noshare2, running).
 
