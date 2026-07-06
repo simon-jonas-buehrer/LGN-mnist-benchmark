@@ -288,10 +288,17 @@ class Bench:
               f"{rec['min']:6.1f}m {extra}", flush=True)
 
     def due(self) -> bool:
-        if self.last_eval is None or self.samples - self.last_eval >= self.args.eval_every:
-            self.last_eval = self.samples
+        now = time.time()
+        if self.last_eval is None or now - self.last_eval >= self.args.eval_mins * 60:
+            self.last_eval = now
             return True
         return False
+
+    def done(self) -> bool:
+        if self.samples >= self.args.max_samples:
+            return True
+        return bool(self.args.max_minutes) and \
+            (time.time() - self.t0) / 60 >= self.args.max_minutes
 
 
 # ==========================================================================================
@@ -320,7 +327,7 @@ def train_bp(b: Bench) -> None:
                     "state": {k: v.cpu() for k, v in model.state_dict().items()}}, p)
 
     step = 0
-    while b.samples < args.max_samples:
+    while not b.done():
         if b.due():
             b.log(loss_fn, save_fn, {"step": step, "lr": args.lr})
         model.train()
@@ -386,7 +393,7 @@ def train_cd(b: Bench) -> None:
         new = fwd_hard(acts[0], conns, tts, from_layer=l, acts=acts)
         return new, head_loss(new[-1], yb)[0].item()
 
-    while b.samples < args.max_samples:
+    while not b.done():
         if b.due():
             b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "cd", tts, sels),
                   {"acc_tt": acc_tt, "try_tt": try_tt, "acc_cn": acc_cn, "try_cn": try_cn})
@@ -451,7 +458,7 @@ def train_rs(b: Bench) -> None:
     L = args.depth
     accepts = trials = 0
 
-    while b.samples < args.max_samples:
+    while not b.done():
         if b.due():
             b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
                   {"accepts": accepts, "trials": trials})
@@ -513,7 +520,7 @@ def train_mab(b: Bench) -> None:
         hard_save_fn(b, "mab", tts, sels,
                      extra={"theta": thetas, "alpha": alphas})(p)
 
-    while b.samples < args.max_samples:
+    while not b.done():
         if b.due():
             tts, sels, conns = greedy()
             b.log(hard_loss_fn(conns, tts), save_fn,
@@ -565,7 +572,11 @@ def main():
     p.add_argument("--crop", type=int, default=4, help="augmentation crop padding")
     p.add_argument("--batch", type=int, default=0, help="0 = per-method default")
     p.add_argument("--max-samples", type=float, default=100e6)
-    p.add_argument("--eval-every", type=float, default=250e3)
+    p.add_argument("--max-minutes", type=float, default=0,
+                   help="stop cleanly (final eval + test + ckpt) after this walltime; 0=off")
+    p.add_argument("--eval-mins", type=float, default=2.0,
+                   help="wall-clock minutes between evals (same curve density for slow "
+                        "and fast methods)")
     p.add_argument("--lr", type=float, default=1e-2, help="bp Adam lr")
     p.add_argument("--lr-mab", type=float, default=0.1, help="mab policy lr")
     p.add_argument("--chunk", type=int, default=1024, help="cd nodes per proposal")
