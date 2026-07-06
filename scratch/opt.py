@@ -402,36 +402,90 @@ def hard_save_fn(b: Bench, name: str, tts, sels, extra=None):
 # Trainer 2: pure coordinate descent (exact batch-loss accepts, block coordinates)
 # ==========================================================================================
 def train_cd(b: Bench) -> None:
-    """Block-coordinate descent. Per proposal: pick a layer and a chunk of nodes; either
-    flip ONE random truth-table cell per node (accepted as a package on the exact batch
-    loss, randomly halved on rejection), or -- with learnable connections -- pick one
-    random tap per node and evaluate ALL k candidates independently (one recompute each),
-    committing the best if it beats the base loss. Partial recomputes cost
-    B * (L - l) / L samples."""
+    """Block-coordinate descent on a batch objective that is held FIXED for --props
+    proposals (then re-rolled with fresh augmentation): accepted gains must compound on
+    a stable objective or CD degenerates into a noise walk. Three move types:
+
+    * SWEEP (last layer, the only one wired to the head): the exact per-(node, cell) CE
+      benefit is computed in closed form -- a cell's samples are disjoint from its
+      siblings', so one pass scores all 16 cells of every node -- and every provably
+      improving cell is flipped, verified jointly (cross-node second-order effects),
+      halved on rejection. This is the classic exact tt sweep, under cross-entropy.
+    * FLIP (any layer): one random table-cell flip per node in a random chunk, accepted
+      as a package on the exact batch loss, halved on rejection. Hidden layers have no
+      direct head signal in this architecture, so their only oracle is the recompute.
+    * CONN (with --learn-conn): one random tap per node in a chunk; all k candidates are
+      evaluated independently (one recompute each), the best committed if it improves.
+
+    Partial recomputes from layer l cost B * (L - l) / L samples."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
-    L = args.depth
-    acc_tt = acc_cn = try_tt = try_cn = 0
+    L, h = args.depth, args.width // CLS
+    tau = math.sqrt(h)
+    cnt = {"acc_sw": 0, "try_sw": 0, "acc_tt": 0, "try_tt": 0, "acc_cn": 0, "try_cn": 0}
 
     def recompute(l, acts, yb):
         b.samples += args.batch * (L - l) / L
         new = fwd_hard(acts[0], conns, tts, from_layer=l, acts=acts)
         return new, head_loss(new[-1], yb)[0].item()
 
+    def sweep_last(acts, yb):
+        """Exact per-(node, cell) CE deltas on the last layer -> proposed flip mask."""
+        bits = acts[L]                                       # (B, N) current outputs
+        z = bits.view(bits.shape[0], CLS, h).sum(-1, dtype=torch.float32) / tau
+        lse = torch.logsumexp(z, 1)                          # (B,)
+        ar = torch.arange(len(yb), device=b.dev)
+        zy = z[ar, yb]
+        flip = torch.zeros(args.width, 16, dtype=torch.bool, device=b.dev)
+        x = acts[L - 1]
+        conn = conns[L - 1]
+        b.samples += args.batch / L                          # one layer's worth of work
+        for s0 in range(0, args.width, 8192):
+            seg = slice(s0, min(s0 + 8192, args.width))
+            cell = x[:, conn[seg, 0]].clone()
+            for t in range(1, args.fan_in):
+                cell |= x[:, conn[seg, t]] << t              # (B, n) this node's live cell
+            v = bits[:, seg].float()
+            d = (1.0 - 2.0 * v) / tau                        # dlogit if the live cell flips
+            cls = torch.arange(s0, seg.stop, device=b.dev) // h
+            zg = z[:, cls]
+            dlse = torch.log1p(torch.exp(zg - lse[:, None]) * (d.exp() - 1))
+            dce = dlse - torch.where(cls[None] == yb[:, None], d, 0.0)  # (B, n) exact
+            ben = torch.zeros((seg.stop - s0) * 16, device=b.dev)
+            ben.scatter_add_(0, (torch.arange(seg.stop - s0, device=b.dev)[None] * 16
+                                 + cell.long()).flatten(), dce.flatten())
+            flip[seg] = ben.view(-1, 16) < -1e-4             # improving cells only
+        return flip
+
     while not b.done():
         if b.due():
-            b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "cd", tts, sels),
-                  {"acc_tt": acc_tt, "try_tt": try_tt, "acc_cn": acc_cn, "try_cn": try_cn})
+            b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "cd", tts, sels), dict(cnt))
         xb, yb = b.batch()
         acts = fwd_hard(xb, conns, tts)
         base = head_loss(acts[-1], yb)[0].item()
         b.samples += args.batch
-        for _ in range(args.props):
-            l = int(torch.randint(L, (1,)))
-            conn_move = args.learn_conn and torch.rand(1).item() < 0.25
-            if conn_move:  # k candidates for one random tap per node, each scored alone
-                try_cn += 1
+        for p in range(args.props):
+            u = torch.rand(1).item()
+            if p % 8 == 0:  # SWEEP: exact last-layer move (strong, cheap: head-only)
+                cnt["try_sw"] += 1
+                flip = sweep_last(acts, yb)
+                old = tts[L - 1]
+                for _ in range(1 + args.halvings):
+                    if not int(flip.sum()):
+                        tts[L - 1] = old
+                        break
+                    tts[L - 1] = old ^ flip.to(torch.uint8)
+                    new, lp = recompute(L - 1, acts, yb)
+                    if lp < base:
+                        acts, base = new, lp
+                        cnt["acc_sw"] += 1
+                        break
+                    tts[L - 1] = old
+                    flip &= torch.rand(args.width, 1, device=b.dev) < 0.5
+            elif args.learn_conn and u < 0.25:  # CONN: k candidates, scored independently
+                cnt["try_cn"] += 1
+                l = int(torch.randint(L, (1,)))
                 idx = torch.randperm(b.widths[l], device=b.dev)[:args.chunk // 4]
                 tap = torch.randint(args.fan_in, (idx.numel(),), device=b.dev)
                 cur = sels[l][idx, tap].clone()
@@ -446,9 +500,10 @@ def train_cd(b: Bench) -> None:
                 conns[l] = sel_to_conn(b.cands[l], sels[l])
                 if best_j is not None:
                     acts, base = recompute(l, acts, yb)
-                    acc_cn += 1
-            else:  # one random table-cell flip per node, halving package accept
-                try_tt += 1
+                    cnt["acc_cn"] += 1
+            else:  # FLIP: random-cell package on a random layer, halving accept
+                cnt["try_tt"] += 1
+                l = int(torch.randint(L, (1,)))
                 idx = torch.randperm(b.widths[l], device=b.dev)[:args.chunk]
                 cell = torch.randint(16, (idx.numel(),), device=b.dev)
                 old = tts[l]
@@ -458,15 +513,14 @@ def train_cd(b: Bench) -> None:
                     new, lp = recompute(l, acts, yb)
                     if lp < base:
                         acts, base = new, lp
-                        acc_tt += 1
+                        cnt["acc_tt"] += 1
                         break
                     tts[l] = old
                     keep = torch.rand(idx.numel(), device=b.dev) < 0.5
                     idx, cell = idx[keep], cell[keep]
                     if not idx.numel():
                         break
-    b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "cd", tts, sels),
-          {"acc_tt": acc_tt, "try_tt": try_tt, "acc_cn": acc_cn, "try_cn": try_cn},
+    b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "cd", tts, sels), dict(cnt),
           final=True)
 
 
@@ -476,8 +530,13 @@ def train_cd(b: Bench) -> None:
 def train_rs(b: Bench) -> None:
     """Per step: one joint mutation of the whole genome -- flip --rs-tt random table bits
     and (with learnable connections) re-draw --rs-conn random taps among their k
-    candidates -- then evaluate current and mutant on the SAME fresh augmented batch and
-    keep the mutant if it is no worse. Costs 2B samples per step."""
+    candidates -- then evaluate current and mutant on the SAME fresh augmented batch
+    (common random numbers) and keep the mutant only if it is better with statistical
+    confidence: the per-sample CE differences give a one-sided t-test, accept when
+    mean(d) < -z * std(d) / sqrt(B) with z = 2. Plain mean-comparison acceptance was
+    measured to ERODE the state (winner's curse: mutants selected on batch noise, whose
+    'gains' evaporate on the next batch while the mutation persists -- accept rate ~40%
+    and train accuracy drifting back to chance). Costs 2B samples per step."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
@@ -489,7 +548,14 @@ def train_rs(b: Bench) -> None:
             b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
                   {"accepts": accepts, "trials": trials})
         xb, yb = b.batch()
-        cur = head_loss(fwd_hard(xb, conns, tts)[-1], yb)[0].item()
+
+        def ce_per_sample(cs, ts):
+            bits = fwd_hard(xb, cs, ts)[-1]
+            logits = bits.view(bits.shape[0], CLS, -1).sum(-1, dtype=torch.float32) \
+                / math.sqrt(bits.shape[1] // CLS)
+            return F.cross_entropy(logits, yb, reduction="none")
+
+        cur = ce_per_sample(conns, tts)
         m_tts, m_sels, m_conns = list(tts), list(sels), list(conns)
         lay = torch.randint(L, (args.rs_tt,))
         for l in lay.unique().tolist():  # table-bit flips
@@ -506,10 +572,10 @@ def train_rs(b: Bench) -> None:
                           torch.randint(args.fan_in, (n,), device=b.dev)] = \
                     torch.randint(args.k, (n,), device=b.dev)
                 m_conns[l] = sel_to_conn(b.cands[l], m_sels[l])
-        mut = head_loss(fwd_hard(xb, m_conns, m_tts)[-1], yb)[0].item()
+        d = ce_per_sample(m_conns, m_tts) - cur
         b.samples += 2 * args.batch
         trials += 1
-        if mut <= cur:
+        if d.mean().item() < -2.0 * d.std().item() / math.sqrt(len(d)):
             tts, sels, conns = m_tts, m_sels, m_conns
             accepts += 1
     b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
@@ -614,7 +680,9 @@ def main():
     p.add_argument("--lr", type=float, default=1e-2, help="bp Adam lr")
     p.add_argument("--lr-mab", type=float, default=0.1, help="mab policy lr")
     p.add_argument("--chunk", type=int, default=1024, help="cd nodes per proposal")
-    p.add_argument("--props", type=int, default=32, help="cd proposals per batch")
+    p.add_argument("--props", type=int, default=128,
+                   help="cd proposals per batch re-roll: the batch objective is held "
+                        "fixed this long so accepted gains compound")
     p.add_argument("--halvings", type=int, default=3, help="cd package halvings on reject")
     p.add_argument("--rs-tt", type=int, default=64, help="rs table bits per mutation")
     p.add_argument("--rs-conn", type=int, default=16, help="rs tap re-draws per mutation")
@@ -626,7 +694,7 @@ def main():
     args = p.parse_args()
     assert args.width % CLS == 0, "width must be divisible by the class count"
     if args.batch == 0:
-        args.batch = {"bp": 256, "cd": 2048, "rs": 512, "mab": 512}[args.method]
+        args.batch = {"bp": 256, "cd": 4096, "rs": 2048, "mab": 512}[args.method]
     print(f"args={vars(args)}", flush=True)
     bench = Bench(args)
     {"bp": train_bp, "cd": train_cd, "rs": train_rs, "mab": train_mab}[args.method](bench)
