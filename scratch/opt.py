@@ -63,7 +63,7 @@ from train import load_cifar10  # noqa: E402
 CLS = 10
 TOPO_SEED = 0  # wiring + candidate sources: identical for every method, always
 RES_BP = 1.2   # bp residual bias on the sin latent: soft bit ~ 0.97 toward pass-through
-RES_MAB = 2.0  # mab residual bias on the Bernoulli policy logit (sigmoid(2) ~ 0.88).
+RES_MAB = 1.5  # mab residual bias on the Bernoulli policy logit (sigmoid(1.5) ~ 0.82).
                # The paper's logit-5 is for BACKPROP gate logits; for a sampling policy
                # the per-bit REINFORCE escape gradient is lr*a*(b-p) ~ 0.0007/step at
                # p=0.993 -- measured at full scale: loss 24.4->24.0 in 7k steps, frozen.
@@ -350,10 +350,15 @@ def train_bp(b: Bench) -> None:
                     "samples": int(b.samples),
                     "state": {k: v.cpu() for k, v in model.state_dict().items()}}, p)
 
-    step = 0
+    step, lr = 0, args.lr
     while not b.done():
         if b.due():
-            b.log(loss_fn, save_fn, {"step": step, "lr": args.lr})
+            b.log(loss_fn, save_fn, {"step": step, "lr": round(lr, 5)})
+        if args.max_minutes:  # cosine decay over the walltime budget (plateaued flat
+            frac = min(1.0, (time.time() - b.t0) / 60 / args.max_minutes)  # at lr 1e-2)
+            lr = args.lr * 0.5 * (1 + math.cos(math.pi * frac))
+            for g in opt.param_groups:
+                g["lr"] = lr
         model.train()
         xb, yb = b.batch()
         loss = F.cross_entropy(model(xb.float()), yb)
@@ -362,7 +367,7 @@ def train_bp(b: Bench) -> None:
         opt.step()
         b.samples += args.batch
         step += 1
-    b.log(loss_fn, save_fn, {"step": step, "lr": args.lr}, final=True)
+    b.log(loss_fn, save_fn, {"step": step, "lr": round(lr, 5)}, final=True)
 
 
 # ==========================================================================================
@@ -420,7 +425,11 @@ def train_cd(b: Bench) -> None:
     * CONN (with --learn-conn): one random tap per node in a chunk; all k candidates are
       evaluated independently (one recompute each), the best committed if it improves.
 
-    Partial recomputes from layer l cost B * (L - l) / L samples."""
+    Acceptance for every package is the same one-sided t-test as rs (mean per-sample CE
+    delta < -z std/sqrt(B)): raw batch-exact accepts were measured to stop transferring
+    once real gains thin out (train loss bottomed then ROSE while accepts continued --
+    the cd flavor of the winner's curse). Partial recomputes from layer l cost
+    B * (L - l) / L samples."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
@@ -428,37 +437,45 @@ def train_cd(b: Bench) -> None:
     tau = math.sqrt(h)
     cnt = {"acc_sw": 0, "try_sw": 0, "acc_tt": 0, "try_tt": 0, "acc_cn": 0, "try_cn": 0}
 
+    def ce_vec(bits, yb):
+        logits = bits.view(bits.shape[0], CLS, h).sum(-1, dtype=torch.float32) / tau
+        return F.cross_entropy(logits, yb, reduction="none")
+
     def recompute(l, acts, yb):
         b.samples += args.batch * (L - l) / L
         new = fwd_hard(acts[0], conns, tts, from_layer=l, acts=acts)
-        return new, head_loss(new[-1], yb)[0].item()
+        return new, ce_vec(new[-1], yb)
 
-    def sweep_last(acts, yb):
-        """Exact per-(node, cell) CE deltas on the last layer -> proposed flip mask."""
+    def better(d):  # d = proposal per-sample CE minus base: one-sided t-test
+        return d.mean().item() < -args.rs_z * d.std().item() / math.sqrt(len(d))
+
+    def sweep_last(acts, yb, nodes):
+        """Exact per-(node, cell) CE deltas on the last layer, for the given node subset
+        -> proposed flip mask (full width, zero outside the subset). Sweeping ALL 64k
+        nodes at once was measured dead at full scale (7/992 accepted): tens of
+        thousands of same-class flips interact second-order and the joint verify never
+        passes -- a subset keeps the package verifiable."""
         bits = acts[L]                                       # (B, N) current outputs
         z = bits.view(bits.shape[0], CLS, h).sum(-1, dtype=torch.float32) / tau
         lse = torch.logsumexp(z, 1)                          # (B,)
-        ar = torch.arange(len(yb), device=b.dev)
-        zy = z[ar, yb]
         flip = torch.zeros(args.width, 16, dtype=torch.bool, device=b.dev)
         x = acts[L - 1]
         conn = conns[L - 1]
         b.samples += args.batch / L                          # one layer's worth of work
-        for s0 in range(0, args.width, 8192):
-            seg = slice(s0, min(s0 + 8192, args.width))
-            cell = x[:, conn[seg, 0]].clone()
-            for t in range(1, args.fan_in):
-                cell |= x[:, conn[seg, t]] << t              # (B, n) this node's live cell
-            v = bits[:, seg].float()
-            d = (1.0 - 2.0 * v) / tau                        # dlogit if the live cell flips
-            cls = torch.arange(s0, seg.stop, device=b.dev) // h
-            zg = z[:, cls]
-            dlse = torch.log1p(torch.exp(zg - lse[:, None]) * (d.exp() - 1))
-            dce = dlse - torch.where(cls[None] == yb[:, None], d, 0.0)  # (B, n) exact
-            ben = torch.zeros((seg.stop - s0) * 16, device=b.dev)
-            ben.scatter_add_(0, (torch.arange(seg.stop - s0, device=b.dev)[None] * 16
-                                 + cell.long()).flatten(), dce.flatten())
-            flip[seg] = ben.view(-1, 16) < -1e-4             # improving cells only
+        cell = x[:, conn[nodes, 0]].clone()
+        for t in range(1, args.fan_in):
+            cell |= x[:, conn[nodes, t]] << t                # (B, n) this node's live cell
+        v = bits[:, nodes].float()
+        d = (1.0 - 2.0 * v) / tau                            # dlogit if the live cell flips
+        cls = nodes // h
+        zg = z[:, cls]
+        dlse = torch.log1p(torch.exp(zg - lse[:, None]) * (d.exp() - 1))
+        dce = dlse - torch.where(cls[None] == yb[:, None], d, 0.0)  # (B, n) exact
+        n = nodes.numel()
+        ben = torch.zeros(n * 16, device=b.dev)
+        ben.scatter_add_(0, (torch.arange(n, device=b.dev)[None] * 16
+                             + cell.long()).flatten(), dce.flatten())
+        flip[nodes] = ben.view(-1, 16) < -1e-4               # improving cells only
         return flip
 
     while not b.done():
@@ -466,13 +483,14 @@ def train_cd(b: Bench) -> None:
             b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "cd", tts, sels), dict(cnt))
         xb, yb = b.batch()
         acts = fwd_hard(xb, conns, tts)
-        base = head_loss(acts[-1], yb)[0].item()
+        base = ce_vec(acts[-1], yb)
         b.samples += args.batch
         for p in range(args.props):
             u = torch.rand(1).item()
-            if p % 8 == 0:  # SWEEP: exact last-layer move (strong, cheap: head-only)
+            if p % 4 == 0:  # SWEEP: exact last-layer move (strong, cheap: head-only)
                 cnt["try_sw"] += 1
-                flip = sweep_last(acts, yb)
+                nodes = torch.randperm(args.width, device=b.dev)[:8192]
+                flip = sweep_last(acts, yb, nodes)
                 old = tts[L - 1]
                 for _ in range(1 + args.halvings):
                     if not int(flip.sum()):
@@ -480,7 +498,7 @@ def train_cd(b: Bench) -> None:
                         break
                     tts[L - 1] = old ^ flip.to(torch.uint8)
                     new, lp = recompute(L - 1, acts, yb)
-                    if lp < base:
+                    if better(lp - base):
                         acts, base = new, lp
                         cnt["acc_sw"] += 1
                         break
@@ -492,13 +510,14 @@ def train_cd(b: Bench) -> None:
                 idx = torch.randperm(b.widths[l], device=b.dev)[:args.chunk // 4]
                 tap = torch.randint(args.fan_in, (idx.numel(),), device=b.dev)
                 cur = sels[l][idx, tap].clone()
-                best, best_j = base, None
+                best, best_j = None, None
                 for j in range(args.k):
                     sels[l][idx, tap] = j
                     conns[l] = sel_to_conn(b.cands[l], sels[l])
                     _, lj = recompute(l, acts, yb)
-                    if lj < best:
-                        best, best_j = lj, j
+                    d = lj - base
+                    if better(d) and (best is None or d.mean() < best):
+                        best, best_j = d.mean().item(), j
                 sels[l][idx, tap] = cur if best_j is None else best_j
                 conns[l] = sel_to_conn(b.cands[l], sels[l])
                 if best_j is not None:
@@ -514,7 +533,7 @@ def train_cd(b: Bench) -> None:
                     tts[l] = old.clone()
                     tts[l][idx, cell] ^= 1
                     new, lp = recompute(l, acts, yb)
-                    if lp < base:
+                    if better(lp - base):
                         acts, base = new, lp
                         cnt["acc_tt"] += 1
                         break
@@ -548,18 +567,24 @@ def train_rs(b: Bench) -> None:
     would collapse f (measured on the small net). Upward it is correct and necessary --
     a fixed 64-bit mutation on the 8.2M-bit full-scale genome moved the loss ~0.7 per
     2M samples while 76% of trials were accepting: steps far too small. Costs 2B
-    samples per step."""
+    samples per step.
+    The mutated LAYER is drawn from a per-layer EMA of accepted improvement (with a
+    uniform floor), so mutation mass flows to wherever it currently pays -- at depth 8
+    most layers stop yielding long before the last ones do, and uniform layer choice
+    wastes 2 forwards per dead trial."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
     L = args.depth
     accepts = trials = 0
     f = 1.0  # mutation-size multiplier, 1/5-success-rule adapted
+    lyield = torch.ones(L)  # per-layer EMA of accepted improvement (uniform at start)
 
     while not b.done():
         if b.due():
             b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
-                  {"accepts": accepts, "trials": trials, "f": round(f, 3)})
+                  {"accepts": accepts, "trials": trials, "f": round(f, 3),
+                   "lyield": [round(v, 5) for v in lyield.tolist()]})
         xb, yb = b.batch()
 
         def ce_per_sample(cs, ts):
@@ -570,7 +595,8 @@ def train_rs(b: Bench) -> None:
 
         cur = ce_per_sample(conns, tts)
         m_tts, m_sels, m_conns = list(tts), list(sels), list(conns)
-        l = int(torch.randint(L, (1,)))                      # one layer per mutation
+        w = lyield + 0.1 * lyield.mean() + 1e-8              # floor keeps cold layers alive
+        l = int(torch.multinomial(w / w.sum(), 1))           # one layer per mutation
         n = max(1, round(args.rs_tt * f))
         m_tts[l] = m_tts[l].clone()
         m_tts[l][torch.randint(b.widths[l], (n,), device=b.dev),
@@ -589,8 +615,10 @@ def train_rs(b: Bench) -> None:
             tts, sels, conns = m_tts, m_sels, m_conns
             accepts += 1
             f = min(f * 1.5, 20_000.0)
+            lyield[l] = 0.95 * lyield[l] + 0.05 * max(0.0, -d.mean().item())
         else:
             f = max(f * 1.5 ** -0.25, 1.0)
+            lyield[l] = 0.95 * lyield[l]
     b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
           {"accepts": accepts, "trials": trials, "f": round(f, 3)}, final=True)
 
@@ -599,14 +627,21 @@ def train_rs(b: Bench) -> None:
 # Trainer 4: pure multi-armed bandit / policy gradient (REINFORCE per bit and per tap)
 # ==========================================================================================
 def train_mab(b: Bench) -> None:
-    """Every table bit is a 2-armed bandit (Bernoulli policy, Gaussian-initialized logit)
-    and every tap a k-armed bandit (categorical policy over the candidates). Per step:
-    sample one full circuit from the policy, evaluate the batch, and reinforce with the
-    advantage (reward = -CE, EMA baseline, EMA-normalized). Greedy circuit (sigmoid > .5 /
-    argmax) is what gets evaluated and checkpointed."""
+    """Every table bit is a 2-armed bandit (Bernoulli policy logit) and every tap a
+    k-armed bandit (categorical policy over the candidates), trained by REINFORCE with
+    SPARSE ONE-LAYER EXPLORATION and a paired baseline. Per step: pick one random layer
+    and a random subset of --mab-explore of its (node, cell) coordinates (plus taps with
+    --learn-conn); sample ONLY those from the policy while everything else stays at the
+    policy's greedy value; evaluate greedy and perturbed circuits on the SAME batch. The
+    paired difference is attributable to the explored subset alone, so the per-
+    coordinate signal-to-noise no longer drowns -- the full-genome variant sampled ~1M
+    deviating bits per step and the scalar reward carried no usable per-bit credit
+    (measured full scale: frozen at 10-14%). Explored coordinates get
+    lr * adv_normalized * (b - p); the perturbation also avalanche-isolates like rs's
+    one-layer mutations. Costs 2B samples per step."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
-    if args.res_init:  # policy starts ~sigmoid(5) certain of the pass-through bit
+    if args.res_init:  # policy biased toward the pass-through bit
         pat = RES_MAB * (res_pattern(args.fan_in).float() * 2 - 1)
         thetas = [pat.expand(w, -1).clone().to(b.dev) for w in b.widths]
     else:
@@ -615,8 +650,8 @@ def train_mab(b: Bench) -> None:
               for w in b.widths]
     for a in alphas:
         a[:, :, 0] += 4.0  # start at the monarch tap
-    baseline, var = None, 1e-4
-    step = 0
+    var, step = 1e-4, 0
+    L = args.depth
 
     def greedy():
         tts = [(t > 0).to(torch.uint8) for t in thetas]
@@ -632,32 +667,34 @@ def train_mab(b: Bench) -> None:
     while not b.done():
         if b.due():
             tts, sels, conns = greedy()
-            b.log(hard_loss_fn(conns, tts), save_fn,
-                  {"step": step, "baseline": None if baseline is None
-                   else round(baseline, 4)})
+            b.log(hard_loss_fn(conns, tts), save_fn, {"step": step})
         xb, yb = b.batch()
-        probs = [torch.sigmoid(t) for t in thetas]
-        tts = [(torch.rand_like(p) < p).to(torch.uint8) for p in probs]
+        tts, sels, conns = greedy()
+        loss0 = head_loss(fwd_hard(xb, conns, tts)[-1], yb)[0].item()
+        l = int(torch.randint(L, (1,)))
+        node = torch.randint(b.widths[l], (args.mab_explore,), device=b.dev)
+        cell = torch.randint(16, (args.mab_explore,), device=b.dev)
+        p = torch.sigmoid(thetas[l][node, cell])
+        bit = (torch.rand_like(p) < p)
+        tts[l] = tts[l].clone()
+        tts[l][node, cell] = bit.to(torch.uint8)
         if args.learn_conn:
-            pis = [a.softmax(-1) for a in alphas]
-            sels = [torch.multinomial(pi.view(-1, args.k), 1).view(pi.shape[:-1])
-                    for pi in pis]
-        else:
-            sels = [torch.zeros(w, args.fan_in, dtype=torch.int64, device=b.dev)
-                    for w in b.widths]
-        conns = [sel_to_conn(c, s) for c, s in zip(b.cands, sels)]
-        loss = head_loss(fwd_hard(xb, conns, tts)[-1], yb)[0].item()
-        b.samples += args.batch
-        r = -loss
-        baseline = r if baseline is None else 0.99 * baseline + 0.01 * r
-        adv = r - baseline
+            tnode = torch.randint(b.widths[l], (args.mab_explore // 8,), device=b.dev)
+            tap = torch.randint(args.fan_in, (tnode.numel(),), device=b.dev)
+            pi = alphas[l][tnode, tap].softmax(-1)                    # (n, k)
+            j = torch.multinomial(pi, 1).squeeze(1)
+            sels[l] = sels[l].clone()
+            sels[l][tnode, tap] = j
+            conns[l] = sel_to_conn(b.cands[l], sels[l])
+        loss1 = head_loss(fwd_hard(xb, conns, tts)[-1], yb)[0].item()
+        b.samples += 2 * args.batch
+        adv = loss0 - loss1                     # paired: >0 iff the perturbation helped
         var = 0.99 * var + 0.01 * adv * adv
         a_n = adv / math.sqrt(var + 1e-8)
-        for l in range(args.depth):
-            thetas[l] += args.lr_mab * a_n * (tts[l].float() - probs[l])
-            if args.learn_conn:
-                onehot = F.one_hot(sels[l], args.k).float()
-                alphas[l] += args.lr_mab * a_n * (onehot - pis[l])
+        thetas[l][node, cell] += args.lr_mab * a_n * (bit.float() - p)
+        if args.learn_conn:
+            alphas[l][tnode, tap] += args.lr_mab * a_n \
+                * (F.one_hot(j, args.k).float() - pi)
         step += 1
     tts, sels, conns = greedy()
     b.log(hard_loss_fn(conns, tts), save_fn, {"step": step}, final=True)
@@ -691,12 +728,14 @@ def main():
                    help="wall-clock minutes between evals (same curve density for slow "
                         "and fast methods)")
     p.add_argument("--lr", type=float, default=1e-2, help="bp Adam lr")
-    p.add_argument("--lr-mab", type=float, default=0.1, help="mab policy lr")
+    p.add_argument("--lr-mab", type=float, default=0.5, help="mab policy lr")
+    p.add_argument("--mab-explore", type=int, default=65536,
+                   help="mab table coordinates explored per step (taps: 1/8 of this)")
     p.add_argument("--chunk", type=int, default=1024, help="cd nodes per proposal")
     p.add_argument("--props", type=int, default=128,
                    help="cd proposals per batch re-roll: the batch objective is held "
                         "fixed this long so accepted gains compound")
-    p.add_argument("--halvings", type=int, default=3, help="cd package halvings on reject")
+    p.add_argument("--halvings", type=int, default=6, help="cd package halvings on reject")
     p.add_argument("--rs-tt", type=int, default=64,
                    help="rs base table bits per mutation (scaled by the adaptive f)")
     p.add_argument("--rs-conn", type=int, default=16,
@@ -711,7 +750,7 @@ def main():
     args = p.parse_args()
     assert args.width % CLS == 0, "width must be divisible by the class count"
     if args.batch == 0:
-        args.batch = {"bp": 256, "cd": 4096, "rs": 4096, "mab": 512}[args.method]
+        args.batch = {"bp": 256, "cd": 4096, "rs": 4096, "mab": 2048}[args.method]
     print(f"args={vars(args)}", flush=True)
     bench = Bench(args)
     {"bp": train_bp, "cd": train_cd, "rs": train_rs, "mab": train_mab}[args.method](bench)
