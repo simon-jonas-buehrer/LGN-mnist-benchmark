@@ -531,20 +531,24 @@ def train_cd(b: Bench) -> None:
 # Trainer 3: pure random search ((1+1)-ES on the discrete genome)
 # ==========================================================================================
 def train_rs(b: Bench) -> None:
-    """(1+1)-ES with SELF-ADAPTIVE mutation size. Per step: one joint mutation of the
-    whole genome -- flip f * --rs-tt random table bits and (with learnable connections)
-    re-draw f * --rs-conn random taps among their k candidates -- then evaluate current
-    and mutant on the SAME fresh augmented batch (common random numbers) and keep the
+    """(1+1)-ES with SELF-ADAPTIVE mutation size and ONE-LAYER mutations. Per step:
+    pick one random layer and flip f * --rs-tt random table bits in it (with learnable
+    connections also re-draw f * --rs-conn of its taps), then evaluate current and
+    mutant on the SAME fresh augmented batch (common random numbers) and keep the
     mutant only if it is better with statistical confidence: the per-sample CE
-    differences give a one-sided t-test, accept when mean(d) < -z * std(d) / sqrt(B),
-    z = 2 (plain mean-comparison acceptance was measured to ERODE the state -- winner's
-    curse). The multiplier f follows the 1/5-success rule: x1.5 on accept, x1.5^-1/4 on
+    differences give a one-sided t-test, accept when mean(d) < -z * std(d) / sqrt(B)
+    (--rs-z; plain mean-comparison acceptance was measured to ERODE the state --
+    winner's curse). Confining a mutation to ONE layer is what makes the test usable at
+    depth: a flipped hidden bit avalanches through up to fan_in**(L-l) downstream
+    nodes, so an all-layer mutation carries the deepest layer's behavioral noise in
+    every trial and drowns real gains (measured full scale: ~7% accepts, +0.3% acc per
+    2 min). The multiplier f follows the 1/5-success rule: x1.5 on accept, x1.5^-1/4 on
     reject, FLOORED at f = 1: below the base size the t-test stops detecting real
     improvements, so low acceptance means 'undetectable', not 'too big', and the rule
     would collapse f (measured on the small net). Upward it is correct and necessary --
     a fixed 64-bit mutation on the 8.2M-bit full-scale genome moved the loss ~0.7 per
-    2M samples (~50M samples just to descend the saturated init) while 76% of trials
-    were accepting, i.e. steps were far too small. Costs 2B samples per step."""
+    2M samples while 76% of trials were accepting: steps far too small. Costs 2B
+    samples per step."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
@@ -566,26 +570,22 @@ def train_rs(b: Bench) -> None:
 
         cur = ce_per_sample(conns, tts)
         m_tts, m_sels, m_conns = list(tts), list(sels), list(conns)
-        n_tt = max(1, round(args.rs_tt * f))
-        lay = torch.randint(L, (n_tt,))
-        for l in lay.unique().tolist():  # table-bit flips
-            n = int((lay == l).sum())
-            m_tts[l] = m_tts[l].clone()
-            m_tts[l][torch.randint(b.widths[l], (n,), device=b.dev),
-                     torch.randint(16, (n,), device=b.dev)] ^= 1
+        l = int(torch.randint(L, (1,)))                      # one layer per mutation
+        n = max(1, round(args.rs_tt * f))
+        m_tts[l] = m_tts[l].clone()
+        m_tts[l][torch.randint(b.widths[l], (n,), device=b.dev),
+                 torch.randint(16, (n,), device=b.dev)] ^= 1
         if args.learn_conn and args.rs_conn:
-            lay = torch.randint(L, (max(1, round(args.rs_conn * f)),))
-            for l in lay.unique().tolist():  # tap re-draws, jointly with the flips
-                n = int((lay == l).sum())
-                m_sels[l] = m_sels[l].clone()
-                m_sels[l][torch.randint(b.widths[l], (n,), device=b.dev),
-                          torch.randint(args.fan_in, (n,), device=b.dev)] = \
-                    torch.randint(args.k, (n,), device=b.dev)
-                m_conns[l] = sel_to_conn(b.cands[l], m_sels[l])
+            n = max(1, round(args.rs_conn * f))
+            m_sels[l] = m_sels[l].clone()
+            m_sels[l][torch.randint(b.widths[l], (n,), device=b.dev),
+                      torch.randint(args.fan_in, (n,), device=b.dev)] = \
+                torch.randint(args.k, (n,), device=b.dev)
+            m_conns[l] = sel_to_conn(b.cands[l], m_sels[l])
         d = ce_per_sample(m_conns, m_tts) - cur
         b.samples += 2 * args.batch
         trials += 1
-        if d.mean().item() < -2.0 * d.std().item() / math.sqrt(len(d)):
+        if d.mean().item() < -args.rs_z * d.std().item() / math.sqrt(len(d)):
             tts, sels, conns = m_tts, m_sels, m_conns
             accepts += 1
             f = min(f * 1.5, 20_000.0)
@@ -697,8 +697,12 @@ def main():
                    help="cd proposals per batch re-roll: the batch objective is held "
                         "fixed this long so accepted gains compound")
     p.add_argument("--halvings", type=int, default=3, help="cd package halvings on reject")
-    p.add_argument("--rs-tt", type=int, default=64, help="rs table bits per mutation")
-    p.add_argument("--rs-conn", type=int, default=16, help="rs tap re-draws per mutation")
+    p.add_argument("--rs-tt", type=int, default=64,
+                   help="rs base table bits per mutation (scaled by the adaptive f)")
+    p.add_argument("--rs-conn", type=int, default=16,
+                   help="rs base tap re-draws per mutation (scaled by f)")
+    p.add_argument("--rs-z", type=float, default=1.5,
+                   help="rs acceptance confidence: accept if mean(d) < -z*std/sqrt(B)")
     p.add_argument("--out", type=Path, required=True, help="prefix for .jsonl and .pt")
     p.add_argument("--resume", action="store_true", help="append to an existing .jsonl")
     p.add_argument("--seed", type=int, default=0)
@@ -707,7 +711,7 @@ def main():
     args = p.parse_args()
     assert args.width % CLS == 0, "width must be divisible by the class count"
     if args.batch == 0:
-        args.batch = {"bp": 256, "cd": 4096, "rs": 2048, "mab": 512}[args.method]
+        args.batch = {"bp": 256, "cd": 4096, "rs": 4096, "mab": 512}[args.method]
     print(f"args={vars(args)}", flush=True)
     bench = Bench(args)
     {"bp": train_bp, "cd": train_cd, "rs": train_rs, "mab": train_mab}[args.method](bench)
