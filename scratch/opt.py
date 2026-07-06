@@ -528,25 +528,31 @@ def train_cd(b: Bench) -> None:
 # Trainer 3: pure random search ((1+1)-ES on the discrete genome)
 # ==========================================================================================
 def train_rs(b: Bench) -> None:
-    """Per step: one joint mutation of the whole genome -- flip --rs-tt random table bits
-    and (with learnable connections) re-draw --rs-conn random taps among their k
-    candidates -- then evaluate current and mutant on the SAME fresh augmented batch
-    (common random numbers) and keep the mutant only if it is better with statistical
-    confidence: the per-sample CE differences give a one-sided t-test, accept when
-    mean(d) < -z * std(d) / sqrt(B) with z = 2. Plain mean-comparison acceptance was
-    measured to ERODE the state (winner's curse: mutants selected on batch noise, whose
-    'gains' evaporate on the next batch while the mutation persists -- accept rate ~40%
-    and train accuracy drifting back to chance). Costs 2B samples per step."""
+    """(1+1)-ES with SELF-ADAPTIVE mutation size. Per step: one joint mutation of the
+    whole genome -- flip f * --rs-tt random table bits and (with learnable connections)
+    re-draw f * --rs-conn random taps among their k candidates -- then evaluate current
+    and mutant on the SAME fresh augmented batch (common random numbers) and keep the
+    mutant only if it is better with statistical confidence: the per-sample CE
+    differences give a one-sided t-test, accept when mean(d) < -z * std(d) / sqrt(B),
+    z = 2 (plain mean-comparison acceptance was measured to ERODE the state -- winner's
+    curse). The multiplier f follows the 1/5-success rule: x1.5 on accept, x1.5^-1/4 on
+    reject, FLOORED at f = 1: below the base size the t-test stops detecting real
+    improvements, so low acceptance means 'undetectable', not 'too big', and the rule
+    would collapse f (measured on the small net). Upward it is correct and necessary --
+    a fixed 64-bit mutation on the 8.2M-bit full-scale genome moved the loss ~0.7 per
+    2M samples (~50M samples just to descend the saturated init) while 76% of trials
+    were accepting, i.e. steps were far too small. Costs 2B samples per step."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
     L = args.depth
     accepts = trials = 0
+    f = 1.0  # mutation-size multiplier, 1/5-success-rule adapted
 
     while not b.done():
         if b.due():
             b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
-                  {"accepts": accepts, "trials": trials})
+                  {"accepts": accepts, "trials": trials, "f": round(f, 3)})
         xb, yb = b.batch()
 
         def ce_per_sample(cs, ts):
@@ -557,14 +563,15 @@ def train_rs(b: Bench) -> None:
 
         cur = ce_per_sample(conns, tts)
         m_tts, m_sels, m_conns = list(tts), list(sels), list(conns)
-        lay = torch.randint(L, (args.rs_tt,))
+        n_tt = max(1, round(args.rs_tt * f))
+        lay = torch.randint(L, (n_tt,))
         for l in lay.unique().tolist():  # table-bit flips
             n = int((lay == l).sum())
             m_tts[l] = m_tts[l].clone()
             m_tts[l][torch.randint(b.widths[l], (n,), device=b.dev),
                      torch.randint(16, (n,), device=b.dev)] ^= 1
         if args.learn_conn and args.rs_conn:
-            lay = torch.randint(L, (args.rs_conn,))
+            lay = torch.randint(L, (max(1, round(args.rs_conn * f)),))
             for l in lay.unique().tolist():  # tap re-draws, jointly with the flips
                 n = int((lay == l).sum())
                 m_sels[l] = m_sels[l].clone()
@@ -578,8 +585,11 @@ def train_rs(b: Bench) -> None:
         if d.mean().item() < -2.0 * d.std().item() / math.sqrt(len(d)):
             tts, sels, conns = m_tts, m_sels, m_conns
             accepts += 1
+            f = min(f * 1.5, 20_000.0)
+        else:
+            f = max(f * 1.5 ** -0.25, 1.0)
     b.log(hard_loss_fn(conns, tts), hard_save_fn(b, "rs", tts, sels),
-          {"accepts": accepts, "trials": trials}, final=True)
+          {"accepts": accepts, "trials": trials, "f": round(f, 3)}, final=True)
 
 
 # ==========================================================================================
