@@ -29,8 +29,9 @@ residual connection), so signal flows through depth from step 0 and sign-symmetr
 broken. Method-natively: cd and rs get the exact pass-through table T[cell] = cell & 1;
 bp is only BIASED toward it (deterministic latents +-RES_BP around the sin bit, plus tiny
 noise), since the relaxation must keep gradients; mab's Bernoulli policy logits are set
-to +-RES_MAB (sigmoid ~ 0.99 toward the pass-through bit), the policy analog of the
-paper's logit-5 bias. --res-init 0 falls back to Gaussian latents (bp, mab) /
+to +-RES_MAB (sigmoid ~ 0.88 toward the pass-through bit -- the policy analog of the
+paper's bias, softened so REINFORCE can escape). --res-init 0 falls back to Gaussian
+latents (bp, mab) /
 Bernoulli(0.5) tables (cd, rs). The x-axis of every learning curve is SAMPLES SEEN: each
 forward of a training batch of B images costs B (partial recomputes from layer l cost
 B * (L - l) / L). Every method logs train/val loss, accuracy and perplexity to
@@ -62,8 +63,10 @@ from train import load_cifar10  # noqa: E402
 CLS = 10
 TOPO_SEED = 0  # wiring + candidate sources: identical for every method, always
 RES_BP = 1.2   # bp residual bias on the sin latent: soft bit ~ 0.97 toward pass-through
-RES_MAB = 5.0  # mab residual bias on the Bernoulli policy logit (sigmoid(5) ~ 0.993),
-               # the strength used for the gate logits in arXiv:2510.03250
+RES_MAB = 2.0  # mab residual bias on the Bernoulli policy logit (sigmoid(2) ~ 0.88).
+               # The paper's logit-5 is for BACKPROP gate logits; for a sampling policy
+               # the per-bit REINFORCE escape gradient is lr*a*(b-p) ~ 0.0007/step at
+               # p=0.993 -- measured at full scale: loss 24.4->24.0 in 7k steps, frozen.
 
 
 def res_pattern(fan_in: int) -> torch.Tensor:
