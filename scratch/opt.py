@@ -265,10 +265,24 @@ class Bench:
         self.test = (ex, ey)  # encoded lazily at the final eval only
         self.samples = 0.0
         self.t0 = time.time()
+        self.wall_offset = 0.0          # cumulative minutes from earlier sessions (resume)
         self.last_eval = None
         self.out = args.out
         self.out.parent.mkdir(parents=True, exist_ok=True)
-        if not args.resume:
+        # --resume: reload the checkpoint (weights loaded per-method below) and continue the
+        # samples / walltime axes so pause-and-continue is seamless. The stop budget
+        # (--max-minutes) is fresh for each session; only the logged axes accumulate.
+        self.resume_ckpt = None
+        pt = self.out.with_suffix(".pt")
+        if args.resume and pt.exists():
+            self.resume_ckpt = torch.load(pt, map_location=self.dev, weights_only=False)
+            self.samples = float(self.resume_ckpt.get("samples", 0))
+            jl = self.out.with_suffix(".jsonl")
+            lines = [ln for ln in jl.read_text().splitlines() if ln.strip()] if jl.exists() else []
+            self.wall_offset = json.loads(lines[-1])["min"] if lines else 0.0
+            print(f"RESUMED {pt.name}: samples={int(self.samples):,} "
+                  f"wall_offset={self.wall_offset:.1f}m", flush=True)
+        elif not args.resume:
             self.out.with_suffix(".jsonl").write_text("")
         print(f"method={args.method} learn_conn={args.learn_conn} I={self.I} "
               f"width={args.width} depth={args.depth} fan_in={args.fan_in} k={args.k} "
@@ -304,7 +318,8 @@ class Bench:
 
     def log(self, loss_fn, save_fn, extra: dict, final: bool = False) -> None:
         m = self.eval_sets(loss_fn, final=final)
-        rec = {"samples": int(self.samples), "min": round((time.time() - self.t0) / 60, 1),
+        rec = {"samples": int(self.samples),
+               "min": round(self.wall_offset + (time.time() - self.t0) / 60, 1),
                **{k: v for k, v in m.items()}, **extra}
         with open(self.out.with_suffix(".jsonl"), "a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -337,6 +352,8 @@ def train_bp(b: Bench) -> None:
     gen = torch.Generator().manual_seed(args.seed)
     model = BPNet(b.cands, args.fan_in, args.k, bool(args.learn_conn), gen,
                   bool(args.res_init)).to(b.dev)
+    if b.resume_ckpt is not None:
+        model.load_state_dict({k: v.to(b.dev) for k, v in b.resume_ckpt["state"].items()})
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     print(f"bp params: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
@@ -393,6 +410,16 @@ def bern_state(b: Bench, gen: torch.Generator) -> tuple[list, list, list]:
     return tts, sels, conns
 
 
+def load_hard_state(b: Bench, tts, sels):
+    """If resuming, overwrite the freshly-initialized hard genome with the checkpointed
+    truth tables + tap selections. Returns (tts, sels, conns)."""
+    if b.resume_ckpt is not None:
+        tts = [t.to(b.dev) for t in b.resume_ckpt["tt"]]
+        sels = [s.to(b.dev) for s in b.resume_ckpt["sel"]]
+    conns = [sel_to_conn(c, s) for c, s in zip(b.cands, sels)]
+    return tts, sels, conns
+
+
 def hard_loss_fn(conns, tts):
     @torch.no_grad()
     def loss_fn(xe, ye):
@@ -427,6 +454,7 @@ def train_cd(b: Bench) -> None:
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
+    tts, sels, conns = load_hard_state(b, tts, sels)
     L = args.depth
     accepts = trials = 0
 
@@ -484,6 +512,7 @@ def train_rs(b: Bench) -> None:
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     tts, sels, conns = bern_state(b, gen)
+    tts, sels, conns = load_hard_state(b, tts, sels)
     L = args.depth
     accepts = trials = 0
 
@@ -547,6 +576,9 @@ def train_mab(b: Bench) -> None:
               for w in b.widths]
     for a in alphas:
         a[:, :, 0] += 3.0  # bandit prior: start near the monarch tap
+    if b.resume_ckpt is not None:
+        thetas = [t.to(b.dev) for t in b.resume_ckpt["theta"]]
+        alphas = [a.to(b.dev) for a in b.resume_ckpt["alpha"]]
     N, step = args.mab_rollouts, 0
 
     def greedy():
