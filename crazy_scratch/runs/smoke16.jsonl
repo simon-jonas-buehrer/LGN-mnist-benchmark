@@ -1,0 +1,4 @@
+{"samples": 0, "min": 0.0, "accepts": 0, "trials": 0, "train": {"loss": 0.90059, "acc": 10.6}, "val": {"loss": 0.90165, "acc": 10.24}}
+{"samples": 181536, "min": 0.5, "accepts": 510, "trials": 1056, "train": {"loss": 0.89695, "acc": 11.34}, "val": {"loss": 0.89834, "acc": 11.04}}
+{"samples": 327424, "min": 1.0, "accepts": 925, "trials": 1920, "train": {"loss": 0.89382, "acc": 12.18}, "val": {"loss": 0.89536, "acc": 11.72}}
+{"samples": 409712, "min": 1.4, "accepts": 1150, "trials": 2384, "train": {"loss": 0.89264, "acc": 12.24}, "val": {"loss": 0.89408, "acc": 11.98}, "test": {"loss": 0.89444, "acc": 11.06}}

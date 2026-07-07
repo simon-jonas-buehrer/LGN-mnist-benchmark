@@ -1,0 +1,27 @@
+{"samples": 0, "min": 0.0, "accepts": 0, "trials": 0, "train": {"loss": 0.90037, "acc": 7.78}, "val": {"loss": 0.89618, "acc": 8.58}}
+{"samples": 4474112, "min": 2.1, "accepts": 820, "trials": 1728, "train": {"loss": 0.89838, "acc": 15.26}, "val": {"loss": 0.89442, "acc": 15.74}}
+{"samples": 8430592, "min": 4.1, "accepts": 1542, "trials": 3264, "train": {"loss": 0.89667, "acc": 15.64}, "val": {"loss": 0.89295, "acc": 15.92}}
+{"samples": 12373248, "min": 6.1, "accepts": 2245, "trials": 4800, "train": {"loss": 0.89503, "acc": 15.46}, "val": {"loss": 0.89151, "acc": 15.88}}
+{"samples": 16302592, "min": 8.2, "accepts": 2949, "trials": 6336, "train": {"loss": 0.89341, "acc": 15.72}, "val": {"loss": 0.89004, "acc": 16.1}}
+{"samples": 20217344, "min": 10.2, "accepts": 3662, "trials": 7872, "train": {"loss": 0.8918, "acc": 15.92}, "val": {"loss": 0.88854, "acc": 15.88}}
+{"samples": 24287488, "min": 12.3, "accepts": 4433, "trials": 9472, "train": {"loss": 0.88986, "acc": 16.12}, "val": {"loss": 0.88679, "acc": 16.22}}
+{"samples": 28263424, "min": 14.3, "accepts": 5124, "trials": 11008, "train": {"loss": 0.88828, "acc": 16.42}, "val": {"loss": 0.88538, "acc": 16.32}}
+{"samples": 32103424, "min": 16.3, "accepts": 5826, "trials": 12544, "train": {"loss": 0.88663, "acc": 16.54}, "val": {"loss": 0.88398, "acc": 16.62}}
+{"samples": 36033024, "min": 18.4, "accepts": 6500, "trials": 14080, "train": {"loss": 0.88517, "acc": 16.58}, "val": {"loss": 0.88272, "acc": 16.88}}
+{"samples": 39988224, "min": 20.5, "accepts": 7173, "trials": 15616, "train": {"loss": 0.88367, "acc": 16.9}, "val": {"loss": 0.88139, "acc": 17.16}}
+{"samples": 43781888, "min": 22.5, "accepts": 7796, "trials": 17088, "train": {"loss": 0.88242, "acc": 16.94}, "val": {"loss": 0.8803, "acc": 17.08}}
+{"samples": 47716864, "min": 24.5, "accepts": 8453, "trials": 18624, "train": {"loss": 0.881, "acc": 17.02}, "val": {"loss": 0.87906, "acc": 17.4}}
+{"samples": 51567104, "min": 26.6, "accepts": 9097, "trials": 20160, "train": {"loss": 0.87976, "acc": 17.14}, "val": {"loss": 0.8779, "acc": 17.66}}
+{"samples": 55527680, "min": 28.6, "accepts": 9737, "trials": 21696, "train": {"loss": 0.87838, "acc": 17.48}, "val": {"loss": 0.87676, "acc": 17.98}}
+{"samples": 59485952, "min": 30.7, "accepts": 10364, "trials": 23296, "train": {"loss": 0.87716, "acc": 17.36}, "val": {"loss": 0.87572, "acc": 17.98}}
+{"samples": 63260416, "min": 32.7, "accepts": 10978, "trials": 24768, "train": {"loss": 0.87586, "acc": 17.86}, "val": {"loss": 0.87455, "acc": 18.18}}
+{"samples": 66996736, "min": 34.7, "accepts": 11587, "trials": 26240, "train": {"loss": 0.87458, "acc": 18.06}, "val": {"loss": 0.87343, "acc": 18.68}}
+{"samples": 70887168, "min": 36.8, "accepts": 12213, "trials": 27776, "train": {"loss": 0.8735, "acc": 18.16}, "val": {"loss": 0.87249, "acc": 18.86}}
+{"samples": 74651136, "min": 38.8, "accepts": 12842, "trials": 29248, "train": {"loss": 0.87225, "acc": 18.44}, "val": {"loss": 0.87139, "acc": 19.14}}
+{"samples": 78433792, "min": 40.9, "accepts": 13393, "trials": 30720, "train": {"loss": 0.87125, "acc": 18.58}, "val": {"loss": 0.87045, "acc": 19.28}}
+{"samples": 82171136, "min": 42.9, "accepts": 13992, "trials": 32192, "train": {"loss": 0.87022, "acc": 18.68}, "val": {"loss": 0.86947, "acc": 19.28}}
+{"samples": 85954048, "min": 45.0, "accepts": 14584, "trials": 33664, "train": {"loss": 0.86918, "acc": 18.96}, "val": {"loss": 0.86855, "acc": 19.56}}
+{"samples": 89718016, "min": 47.0, "accepts": 15138, "trials": 35136, "train": {"loss": 0.86813, "acc": 19.0}, "val": {"loss": 0.8676, "acc": 19.76}}
+{"samples": 93501952, "min": 49.1, "accepts": 15704, "trials": 36608, "train": {"loss": 0.86716, "acc": 19.12}, "val": {"loss": 0.86666, "acc": 19.88}}
+{"samples": 97185024, "min": 51.1, "accepts": 16274, "trials": 38080, "train": {"loss": 0.86611, "acc": 19.64}, "val": {"loss": 0.86575, "acc": 19.92}}
+{"samples": 100122880, "min": 52.8, "accepts": 16700, "trials": 39232, "train": {"loss": 0.86538, "acc": 19.78}, "val": {"loss": 0.86511, "acc": 19.94}, "test": {"loss": 0.86629, "acc": 19.47}}

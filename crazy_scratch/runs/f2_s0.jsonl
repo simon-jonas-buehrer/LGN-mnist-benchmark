@@ -1,0 +1,24 @@
+{"samples": 0, "min": 0.0, "accepts": 0, "trials": 0, "train": {"loss": 0.90037, "acc": 7.78}, "val": {"loss": 0.89618, "acc": 8.58}}
+{"samples": 5158912, "min": 2.0, "accepts": 959, "trials": 2048, "train": {"loss": 0.89787, "acc": 15.3}, "val": {"loss": 0.89394, "acc": 15.16}}
+{"samples": 9668864, "min": 4.1, "accepts": 1793, "trials": 3840, "train": {"loss": 0.89586, "acc": 15.34}, "val": {"loss": 0.89213, "acc": 15.36}}
+{"samples": 14104576, "min": 6.1, "accepts": 2594, "trials": 5568, "train": {"loss": 0.89388, "acc": 15.56}, "val": {"loss": 0.89038, "acc": 15.32}}
+{"samples": 18524928, "min": 8.1, "accepts": 3408, "trials": 7296, "train": {"loss": 0.89196, "acc": 15.88}, "val": {"loss": 0.88865, "acc": 15.62}}
+{"samples": 23040256, "min": 10.2, "accepts": 4192, "trials": 9024, "train": {"loss": 0.89027, "acc": 15.92}, "val": {"loss": 0.8871, "acc": 15.82}}
+{"samples": 27555840, "min": 12.2, "accepts": 4998, "trials": 10816, "train": {"loss": 0.88845, "acc": 15.96}, "val": {"loss": 0.88556, "acc": 15.84}}
+{"samples": 31919616, "min": 14.3, "accepts": 5699, "trials": 12480, "train": {"loss": 0.88673, "acc": 16.14}, "val": {"loss": 0.88399, "acc": 16.0}}
+{"samples": 36327168, "min": 16.3, "accepts": 6444, "trials": 14208, "train": {"loss": 0.88518, "acc": 16.36}, "val": {"loss": 0.88261, "acc": 16.36}}
+{"samples": 40732416, "min": 18.3, "accepts": 7214, "trials": 15936, "train": {"loss": 0.88358, "acc": 16.68}, "val": {"loss": 0.88116, "acc": 16.56}}
+{"samples": 45114624, "min": 20.3, "accepts": 7966, "trials": 17664, "train": {"loss": 0.88189, "acc": 16.82}, "val": {"loss": 0.87967, "acc": 16.82}}
+{"samples": 49553664, "min": 22.4, "accepts": 8683, "trials": 19392, "train": {"loss": 0.88035, "acc": 16.84}, "val": {"loss": 0.87829, "acc": 16.96}}
+{"samples": 53960704, "min": 24.5, "accepts": 9391, "trials": 21120, "train": {"loss": 0.87896, "acc": 17.14}, "val": {"loss": 0.87703, "acc": 17.14}}
+{"samples": 58364928, "min": 26.5, "accepts": 10083, "trials": 22848, "train": {"loss": 0.87756, "acc": 17.22}, "val": {"loss": 0.87576, "acc": 17.28}}
+{"samples": 62714624, "min": 28.6, "accepts": 10744, "trials": 24512, "train": {"loss": 0.87629, "acc": 17.44}, "val": {"loss": 0.87464, "acc": 17.36}}
+{"samples": 67086592, "min": 30.7, "accepts": 11445, "trials": 26240, "train": {"loss": 0.87492, "acc": 17.34}, "val": {"loss": 0.87338, "acc": 17.42}}
+{"samples": 71379200, "min": 32.7, "accepts": 12152, "trials": 27904, "train": {"loss": 0.87368, "acc": 17.56}, "val": {"loss": 0.87231, "acc": 17.66}}
+{"samples": 75676416, "min": 34.7, "accepts": 12806, "trials": 29568, "train": {"loss": 0.8724, "acc": 17.74}, "val": {"loss": 0.87119, "acc": 17.8}}
+{"samples": 79989760, "min": 36.8, "accepts": 13507, "trials": 31296, "train": {"loss": 0.87109, "acc": 17.92}, "val": {"loss": 0.87004, "acc": 17.96}}
+{"samples": 84244224, "min": 38.8, "accepts": 14144, "trials": 32960, "train": {"loss": 0.86984, "acc": 18.1}, "val": {"loss": 0.86898, "acc": 18.22}}
+{"samples": 88466944, "min": 40.8, "accepts": 14801, "trials": 34624, "train": {"loss": 0.8687, "acc": 18.2}, "val": {"loss": 0.86793, "acc": 18.6}}
+{"samples": 92628480, "min": 42.8, "accepts": 15438, "trials": 36288, "train": {"loss": 0.86749, "acc": 18.5}, "val": {"loss": 0.86682, "acc": 18.88}}
+{"samples": 96881920, "min": 44.9, "accepts": 16108, "trials": 37952, "train": {"loss": 0.86647, "acc": 18.66}, "val": {"loss": 0.86581, "acc": 19.22}}
+{"samples": 100084736, "min": 46.5, "accepts": 16600, "trials": 39232, "train": {"loss": 0.86563, "acc": 18.96}, "val": {"loss": 0.86509, "acc": 19.32}, "test": {"loss": 0.86623, "acc": 18.92}}
