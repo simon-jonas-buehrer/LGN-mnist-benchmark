@@ -62,7 +62,7 @@ def draw(groups: dict, xval, xlabel: str, out: Path) -> None:
             if i == 1:
                 ax.set_xlabel(xlabel)
     axes[0][0].legend(fontsize=8)
-    fig.suptitle("Optimizers on a fixed monarch-wired LUT net (depth 8 x 64K, fan-in 4), "
+    fig.suptitle("Optimizers on a fixed monarch-wired LUT net (depth 2 x 64K, fan-in 4), "
                  "CIFAR-10, mean over seeds (band = min-max)")
     fig.tight_layout()
     fig.savefig(out, dpi=120)
