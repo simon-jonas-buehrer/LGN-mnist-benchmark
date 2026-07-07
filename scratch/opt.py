@@ -269,12 +269,13 @@ class Bench:
         self.last_eval = None
         self.out = args.out
         self.out.parent.mkdir(parents=True, exist_ok=True)
-        # --resume: reload the checkpoint (weights loaded per-method below) and continue the
-        # samples / walltime axes so pause-and-continue is seamless. The stop budget
-        # (--max-minutes) is fresh for each session; only the logged axes accumulate.
+        # Resume by default: if a checkpoint already exists at this --out, reload it (weights
+        # loaded per-method below), continue the samples / walltime axes, and APPEND to the
+        # jsonl so pause-and-continue is seamless. No flag -- to start over, delete the .pt.
+        # The stop budget (--max-minutes) is fresh each session; only the logged axes accumulate.
         self.resume_ckpt = None
         pt = self.out.with_suffix(".pt")
-        if args.resume and pt.exists():
+        if pt.exists():
             self.resume_ckpt = torch.load(pt, map_location=self.dev, weights_only=False)
             self.samples = float(self.resume_ckpt.get("samples", 0))
             jl = self.out.with_suffix(".jsonl")
@@ -282,7 +283,7 @@ class Bench:
             self.wall_offset = json.loads(lines[-1])["min"] if lines else 0.0
             print(f"RESUMED {pt.name}: samples={int(self.samples):,} "
                   f"wall_offset={self.wall_offset:.1f}m", flush=True)
-        elif not args.resume:
+        else:
             self.out.with_suffix(".jsonl").write_text("")
         print(f"method={args.method} learn_conn={args.learn_conn} I={self.I} "
               f"width={args.width} depth={args.depth} fan_in={args.fan_in} k={args.k} "
@@ -671,8 +672,8 @@ def main():
     p.add_argument("--mab-rollouts", type=int, default=8,
                    help="mab RLOO rollouts per step; each is baselined by the others' mean "
                         "(variance reduction ~N-fold at N-forward cost)")
-    p.add_argument("--out", type=Path, required=True, help="prefix for .jsonl and .pt")
-    p.add_argument("--resume", action="store_true", help="append to an existing .jsonl")
+    p.add_argument("--out", type=Path, required=True, help="prefix for .jsonl and .pt; an "
+                   "existing .pt is resumed automatically (delete it to start fresh)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
