@@ -150,9 +150,14 @@ def fwd_hard(x0: torch.Tensor, conns: list[torch.Tensor], tts: list[torch.Tensor
 
 
 def head_loss(bits: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(B, h*CLS) bits -> (CE loss, logits): group popcount / sqrt(h) (GroupSum head)."""
-    h = bits.shape[1] // CLS
-    logits = bits.view(bits.shape[0], CLS, h).sum(-1, dtype=torch.float32) / math.sqrt(h)
+    """(B, h*CLS) bits -> (CE loss, logits): group popcount / sqrt(h) (GroupSum head).
+    Summed in int32 in batch chunks so the (B, width) upcast never materializes at once
+    (a full-width float32 copy is ~2 GB at batch 8192, width 64000)."""
+    B, h = bits.shape[0], bits.shape[1] // CLS
+    logits = torch.empty(B, CLS, device=bits.device)
+    for i in range(0, B, 2048):
+        logits[i:i + 2048] = bits[i:i + 2048].view(-1, CLS, h).sum(-1, dtype=torch.int32)
+    logits /= math.sqrt(h)
     return F.cross_entropy(logits, y), logits
 
 
@@ -516,25 +521,25 @@ def train_rs(b: Bench) -> None:
 # Trainer 4: pure multi-armed bandit / policy gradient (REINFORCE per bit and per tap)
 # ==========================================================================================
 def train_mab(b: Bench) -> None:
-    """PURE per-node policy gradient (REINFORCE) -- nothing like backprop. Every node is a
-    stochastic policy over the function it implements: each of its 16 truth-table cells is
-    an independent Bernoulli arm with a logit (theta), and -- with --learn-conn -- each tap
-    is a k-armed categorical arm (logits alpha). ONE forward per step: sample the WHOLE
-    circuit from the policy (every cell's bit, every tap's candidate), run it, take the
-    scalar reward R = -CE of that sampled circuit. Then the vanilla score-function update
-    on EVERY node at once:
+    """Per-node policy gradient (REINFORCE) with a LEAVE-ONE-OUT baseline (RLOO) --
+    nothing like backprop. Every node is a stochastic policy over the function it
+    implements: each of its 16 truth-table cells is an independent Bernoulli arm with a
+    logit (theta), and -- with --learn-conn -- each tap is a k-armed categorical arm
+    (logits alpha). Per step: sample --mab-rollouts INDEPENDENT whole circuits from the
+    policy, run each (reward R_i = -CE), and give rollout i the advantage
+    A_i = R_i - mean_{j!=i} R_j (leave-one-out: the other rollouts ARE its baseline).
+    Then the score-function update summed over rollouts and every node at once:
 
-        theta += lr * (R - baseline) * (bit - p)          # Bernoulli cell
-        alpha += lr * (R - baseline) * (onehot(a) - pi)   # categorical tap
+        theta += lr/N * sum_i A_i * (bit_i - p)             # Bernoulli cell
+        alpha += lr/N * sum_i A_i * (onehot(a_i) - pi)      # categorical tap
 
-    i.e. always push UP the log-prob of the function you just used, scaled by how much
-    better than the running baseline this sample scored -- so in expectation the better
-    functions get upweighted more. The baseline is an EMA of R and the advantage is
-    EMA-std-normalized (variance reduction only; both leave the estimator unbiased). This
-    is the textbook estimator: unbiased, and with one scalar reward shared across all
-    ~8M cells the per-node variance is enormous -- mab is the deliberately-weak,
-    gradient-free-and-credit-free baseline of the study. Greedy circuit (sigmoid>0.5 /
-    argmax) is what is evaluated and checkpointed. Costs B samples per step."""
+    RLOO is the key variance-reduction fix (arXiv:2402.14740 and the classic VIMCO): a
+    single global scalar reward shared across ~8M cells gives a hopelessly noisy per-node
+    gradient (measured: pure single-rollout REINFORCE stalled ~13-15% val); the LOO
+    baseline is the minimum-variance unbiased control variate for this exchangeable-
+    sample estimator and cuts the noise ~N-fold at N-forward cost. Advantages are
+    additionally std-normalized across the rollout batch. Greedy circuit (sigmoid>0.5 /
+    argmax) is evaluated and checkpointed. Costs N*B samples per step."""
     args = b.args
     gen = torch.Generator().manual_seed(args.seed)
     thetas = [(0.5 * torch.randn(w, 16, generator=gen)).to(b.dev) for w in b.widths]
@@ -542,7 +547,7 @@ def train_mab(b: Bench) -> None:
               for w in b.widths]
     for a in alphas:
         a[:, :, 0] += 3.0  # bandit prior: start near the monarch tap
-    baseline, var, step = None, 1.0, 0
+    N, step = args.mab_rollouts, 0
 
     def greedy():
         tts = [(t > 0).to(torch.uint8) for t in thetas]
@@ -557,32 +562,33 @@ def train_mab(b: Bench) -> None:
     while not b.done():
         if b.due():
             tts, sels, conns = greedy()
-            b.log(hard_loss_fn(conns, tts), save_fn,
-                  {"step": step, "baseline": None if baseline is None else round(baseline, 4)})
+            b.log(hard_loss_fn(conns, tts), save_fn, {"step": step})
         xb, yb = b.batch()
-        probs = [torch.sigmoid(t) for t in thetas]           # sample the WHOLE circuit
-        bits = [(torch.rand_like(p) < p) for p in probs]
-        tts = [bt.to(torch.uint8) for bt in bits]
-        if args.learn_conn:
-            pis = [a.softmax(-1) for a in alphas]
-            acts = [torch.multinomial(pi.reshape(-1, args.k), 1).reshape(w, args.fan_in)
-                    for pi, w in zip(pis, b.widths)]
-            conns = [sel_to_conn(c, s) for c, s in zip(b.cands, acts)]
-        else:
-            conns = [sel_to_conn(c, torch.zeros(w, args.fan_in, dtype=torch.int64,
-                                                device=b.dev))
-                     for c, w in zip(b.cands, b.widths)]
-        loss = head_loss(fwd_hard(xb, conns, tts)[-1], yb)[0].item()
-        b.samples += args.batch
-        R = -loss
-        baseline = R if baseline is None else 0.99 * baseline + 0.01 * R
-        var = 0.99 * var + 0.01 * (R - baseline) ** 2
-        adv = (R - baseline) / math.sqrt(var + 1e-8)         # normalized advantage
-        for l in range(args.depth):                          # REINFORCE on EVERY node
-            thetas[l] += args.lr_mab * adv * (bits[l].float() - probs[l])
+        probs = [torch.sigmoid(t) for t in thetas]
+        pis = [a.softmax(-1) for a in alphas] if args.learn_conn else None
+        rolls, R = [], []                                    # N independent rollouts
+        for _ in range(N):
+            bits = [(torch.rand_like(p) < p) for p in probs]
+            tts = [bt.to(torch.uint8) for bt in bits]
             if args.learn_conn:
-                alphas[l] += args.lr_mab * adv \
-                    * (F.one_hot(acts[l], args.k).float() - pis[l])
+                acts = [torch.multinomial(pi.reshape(-1, args.k), 1).reshape(w, args.fan_in)
+                        for pi, w in zip(pis, b.widths)]
+            else:
+                acts = [torch.zeros(w, args.fan_in, dtype=torch.int64, device=b.dev)
+                        for w in b.widths]
+            conns = [sel_to_conn(c, s) for c, s in zip(b.cands, acts)]
+            R.append(-head_loss(fwd_hard(xb, conns, tts)[-1], yb)[0].item())
+            rolls.append((bits, acts))
+            b.samples += args.batch
+        Rt = torch.tensor(R)
+        adv = Rt - (Rt.sum() - Rt) / (N - 1)                 # leave-one-out baseline
+        adv = (adv / (adv.std() + 1e-8)).tolist()            # normalize across rollouts
+        for i, (bits, acts) in enumerate(rolls):             # REINFORCE, LOO-baselined
+            for l in range(args.depth):
+                thetas[l] += args.lr_mab / N * adv[i] * (bits[l].float() - probs[l])
+                if args.learn_conn:
+                    alphas[l] += args.lr_mab / N * adv[i] \
+                        * (F.one_hot(acts[l], args.k).float() - pis[l])
         step += 1
     tts, sels, conns = greedy()
     b.log(hard_loss_fn(conns, tts), save_fn, {"step": step}, final=True)
@@ -622,14 +628,17 @@ def main():
                    help="cd proposals per batch re-roll: the batch objective is held "
                         "fixed this long so accepted gains compound")
     p.add_argument("--halvings", type=int, default=6, help="cd package halvings on reject")
-    p.add_argument("--rs-tt", type=int, default=64,
-                   help="rs base table bits per mutation (scaled by the adaptive f)")
+    p.add_argument("--rs-tt", type=int, default=16,
+                   help="rs table cells flipped per mutation (fewer = higher accept rate)")
     p.add_argument("--rs-conn", type=int, default=16,
                    help="rs base tap re-draws per mutation (scaled by f)")
     p.add_argument("--rs-z", type=float, default=1.5,
                    help="rs acceptance confidence: accept if mean(d) < -z*std/sqrt(B)")
     p.add_argument("--rs-lambda", type=int, default=8,
                    help="rs (1+lambda): mutants scored per base eval, sharing its forward")
+    p.add_argument("--mab-rollouts", type=int, default=8,
+                   help="mab RLOO rollouts per step; each is baselined by the others' mean "
+                        "(variance reduction ~N-fold at N-forward cost)")
     p.add_argument("--out", type=Path, required=True, help="prefix for .jsonl and .pt")
     p.add_argument("--resume", action="store_true", help="append to an existing .jsonl")
     p.add_argument("--seed", type=int, default=0)
@@ -638,7 +647,7 @@ def main():
     args = p.parse_args()
     assert args.width % CLS == 0, "width must be divisible by the class count"
     if args.batch == 0:
-        args.batch = {"bp": 256, "cd": 8192, "rs": 8192, "mab": 8192}[args.method]
+        args.batch = {"bp": 256, "cd": 4096, "rs": 8192, "mab": 8192}[args.method]
     print(f"args={vars(args)}", flush=True)
     bench = Bench(args)
     {"bp": train_bp, "cd": train_cd, "rs": train_rs, "mab": train_mab}[args.method](bench)
