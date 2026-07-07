@@ -80,9 +80,7 @@ def main() -> None:
             groups[cfg].append(rows)
     if not groups:
         sys.exit(f"no .jsonl runs in {RUNS}")
-    draw(groups, lambda r: r["samples"], "samples seen", RUNS / "curves.png")
-    draw(groups, lambda r: r["min"] / 60.0, "wall-clock hours (1 GPU)",
-         RUNS / "curves_time.png")
+    draw(groups, lambda r: r["min"], "wall-clock minutes (1 GPU)", RUNS / "curves.png")
 
 
 if __name__ == "__main__":
