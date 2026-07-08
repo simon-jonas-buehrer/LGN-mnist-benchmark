@@ -18,7 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-COLORS = {"dense (boost)": "#1f77b4", "conv (conv_boost)": "#d62728"}
+PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#8c564b"]
 
 
 def load(prefix: Path) -> list[dict]:
@@ -31,21 +31,23 @@ def load(prefix: Path) -> list[dict]:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--runs", nargs="+",
-                   default=["dense (boost)=tree_scratch/runs/b_dense",
-                            "conv (conv_boost)=tree_scratch/runs/c_conv"],
+                   default=["dense=tree_scratch/runs/b_dense",
+                            "dense+aug=tree_scratch/runs/dense_aug",
+                            "conv=tree_scratch/runs/c_conv",
+                            "conv+aug=tree_scratch/runs/push_conv"],
                    help="label=prefix pairs (prefix without extension)")
     p.add_argument("--out", type=Path, default=Path("tree_scratch/runs/curves.png"))
     args = p.parse_args()
 
     fig, ax = plt.subplots(figsize=(9, 6))
-    for spec in args.runs:
+    for i, spec in enumerate(args.runs):
         label, prefix = spec.split("=", 1)
         recs = load(Path(prefix))
         if not recs:
             print(f"[skip] no data for {label} ({prefix}.jsonl)")
             continue
         x = [r["tree"] for r in recs]
-        color = COLORS.get(label, None)
+        color = PALETTE[i % len(PALETTE)]
         ax.plot(x, [r["train"] for r in recs], "--", color=color, alpha=0.6,
                 label=f"{label} train")
         ax.plot(x, [r["val"] for r in recs], "-", color=color, linewidth=2,
@@ -59,7 +61,8 @@ def main():
 
     ax.set_xlabel("boosting round (tree index)")
     ax.set_ylabel("accuracy (%)")
-    ax.set_title("Tree methods on CIFAR-10: dense boost vs conv-tree + boosted head")
+    ax.set_title("Tree methods on CIFAR-10: augmentation × conv-locality levers "
+                 "(train dashed, val solid)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="lower right", fontsize=9)
     fig.tight_layout()
