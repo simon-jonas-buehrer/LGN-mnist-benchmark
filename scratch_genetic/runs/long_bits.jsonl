@@ -1,0 +1,4 @@
+{"gen": 0, "gates": 1051136, "batch": 96.17, "train": 9.65, "val": 9.84, "test": 9.86, "train_loss": 90.35, "val_loss": 90.16, "test_loss": 90.14, "min": 0.02, "gps": 0.7}
+{"gen": 1000, "gates": 1051136, "batch": 96.81, "train": 13.09, "val": 12.3, "test": 12.68, "train_loss": 86.91, "val_loss": 87.7, "test_loss": 87.32, "min": 1.66, "gps": 10.1}
+{"gen": 2000, "gates": 1051136, "batch": 97.43, "train": 15.78, "val": 14.56, "test": 15.0, "train_loss": 84.22, "val_loss": 85.44, "test_loss": 85.0, "min": 3.3, "gps": 10.1}
+{"gen": 3000, "gates": 1051136, "batch": 98.07, "train": 17.73, "val": 16.66, "test": 16.67, "train_loss": 82.27, "val_loss": 83.34, "test_loss": 83.33, "min": 4.95, "gps": 10.1}
