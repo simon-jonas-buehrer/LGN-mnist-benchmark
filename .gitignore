@@ -13,3 +13,7 @@ data/
 scratch/grow.log
 
 # the trained checkpoint in results/ is committed on purpose, so it stays tracked.
+
+# large run checkpoints — kept on local disk for re-plot/resume, but exceed GitHub's
+# 100MB file limit, so they must not be committed (strip from history if they slip in).
+tree_scratch/runs/*.pkl
