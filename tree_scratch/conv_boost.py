@@ -36,8 +36,8 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from model import Thermometer  # noqa: E402
 from train import load_cifar10  # noqa: E402
-from tree_scratch.boost import (CLS, build_features, ensemble_scores,  # noqa: E402
-                                fit_boost)
+from tree_scratch.boost import (CLS, augment_train, build_features,  # noqa: E402
+                                ensemble_scores, fit_boost)
 
 
 # ==========================================================================================
@@ -119,6 +119,10 @@ def main():
     p.add_argument("--min-leaf", type=int, default=4)
     p.add_argument("--max-features", type=int, default=4096)
     p.add_argument("--max-train", type=int, default=0, help="cap train images (0=all; for smoke)")
+    p.add_argument("--hflip", action="store_true", help="augment train with horizontal flips")
+    p.add_argument("--aug-crops", type=int, default=0,
+                   help="augment train with N per-image random reflect-pad crops (extra rows)")
+    p.add_argument("--aug-pad", type=int, default=4, help="crop reflect-pad radius (px)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -133,6 +137,11 @@ def main():
     trx, trY = tx[:-nv], ty[:-nv]
     if args.max_train:
         trx, trY = trx[:args.max_train], trY[:args.max_train]
+    if args.hflip or args.aug_crops:
+        trx, trY = augment_train(trx, trY, hflip=args.hflip, crops=args.aug_crops,
+                                 pad=args.aug_pad, seed=args.seed)
+        print(f"augmented train -> {len(trx)} images "
+              f"(hflip={args.hflip}, crops={args.aug_crops})", flush=True)
 
     @torch.no_grad()
     def bitmap(images):                                   # thermometer bit image (B, 3*nb, 32, 32)

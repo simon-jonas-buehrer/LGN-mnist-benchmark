@@ -74,6 +74,30 @@ def census(img: torch.Tensor, offsets: list[tuple[int, int]], R: int) -> torch.T
     return torch.cat(outs, 1)
 
 
+def augment_train(imgs: torch.Tensor, labels: torch.Tensor, *, hflip: bool, crops: int,
+                  pad: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Grow a FIXED augmented train set (extra ROWS, not on-the-fly -- boosting keeps per-sample
+    weights over a fixed set). original (+ horizontal flip) (+ `crops` per-image random reflect-pad
+    crops of radius `pad`). The single biggest accuracy lever on CIFAR for this model class."""
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    N, C, H, W = imgs.shape
+    outs, ys = [imgs], [labels]
+    if hflip:
+        outs.append(torch.flip(imgs, dims=[3]))
+        ys.append(labels)
+    ar_h, ar_w = torch.arange(H), torch.arange(W)
+    for _ in range(crops):
+        p = F.pad(imgs, (pad, pad, pad, pad), mode="reflect")        # (N,C,H+2p,W+2p)
+        oy = torch.randint(0, 2 * pad + 1, (N,), generator=gen)      # per-image crop offsets
+        ox = torch.randint(0, 2 * pad + 1, (N,), generator=gen)
+        ridx = (oy[:, None] + ar_h)[:, None, :, None].expand(N, C, H, W + 2 * pad)
+        pr = p.gather(2, ridx)                                       # pick 32 rows per image
+        cidx = (ox[:, None] + ar_w)[:, None, None, :].expand(N, C, H, W)
+        outs.append(pr.gather(3, cidx))                             # pick 32 cols per image
+        ys.append(labels)
+    return torch.cat(outs, 0), torch.cat(ys, 0)
+
+
 def build_features(imgs: torch.Tensor, enc32: Thermometer) -> torch.Tensor:
     """Lean binary feature map -> (B, F) uint8 bits, all Boolean so the ensemble stays
     extractable. Deliberately NO pooling / NO convolution: thermometer intensity bits,
@@ -300,6 +324,10 @@ def main():
     p.add_argument("--min-leaf", type=int, default=4, help="min RAW samples per leaf")
     p.add_argument("--max-features", type=int, default=2048,
                    help="feature bits sampled per tree (diversity + speed); 0 = all")
+    p.add_argument("--hflip", action="store_true", help="augment train with horizontal flips")
+    p.add_argument("--aug-crops", type=int, default=0,
+                   help="augment train with N per-image random reflect-pad crops (extra rows)")
+    p.add_argument("--aug-pad", type=int, default=4, help="crop reflect-pad radius (px)")
     p.add_argument("--out", type=Path, required=True, help="prefix for .jsonl and .pkl")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str,
@@ -319,7 +347,11 @@ def main():
                 for i in range(0, len(images), 4096)]
         return torch.cat(outs, 0)
 
-    Xtr, ytr = encode(tx[:-nv]), ty[:-nv].to(dev)
+    trx, trY = tx[:-nv], ty[:-nv]
+    if args.hflip or args.aug_crops:
+        trx, trY = augment_train(trx, trY, hflip=args.hflip, crops=args.aug_crops,
+                                 pad=args.aug_pad, seed=args.seed)
+    Xtr, ytr = encode(trx), trY.to(dev)
     Xva, yva = encode(tx[-nv:]), ty[-nv:].to(dev)
     Xte, yte = encode(ex), ey.to(dev)
     N, I = Xtr.shape
@@ -329,7 +361,8 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     out.with_suffix(".jsonl").write_text("")
     print(f"boost I={I} leaves={args.max_leaves} depth<={args.depth} trees={args.trees} "
-          f"lr={args.lr} min_leaf={args.min_leaf} max_features={MF} train={N} val={nv} "
+          f"lr={args.lr} min_leaf={args.min_leaf} max_features={MF} "
+          f"aug(hflip={args.hflip},crops={args.aug_crops}) train={N} val={nv} "
           f"device={dev}", flush=True)
 
     # ---- SAMME boosting ------------------------------------------------------------------
