@@ -1,14 +1,12 @@
 """Plot the optimizer-benchmark learning curves from scratch/runs/*.jsonl.
 
-Runs are named <method>_conn<0|1>_s<seed>.jsonl; the 3 seeds of each of the 8
-configurations are aggregated into one curve (mean, with a min-max band). Panels:
-rows = train / val, columns = loss / accuracy / perplexity. Two figures, identical
-layout, different x-axis:
-
-    curves.png        x = samples seen        (optimizer sample efficiency)
-    curves_time.png   x = wall-clock hours    (what a GPU-day actually buys)
+Runs are named <method>_conn<0|1>.jsonl (single seed -- per-seed std was
+negligible). One curve per configuration (8 total). Panels: rows = train / val,
+columns = loss / accuracy / perplexity; x-axis = wall-clock minutes.
 
 Color = method, solid = learnable connections, dashed = frozen monarch wiring.
+Aggregation over multiple runs per config (mean + min-max band) still works if
+several files ever map to the same config name.
 
     .venv/bin/python scratch/plot.py
 """
@@ -48,7 +46,7 @@ def draw(groups: dict, xval, xlabel: str, out: Path) -> None:
                                          [r[split][key] for r in s]) for s in seeds])
                 ax = axes[i][j]
                 ax.plot(grid, ys.mean(0), color=color, ls=ls, lw=1.6,
-                        label=f"{cfg} ({len(seeds)}s)" if (i, j) == (0, 0) else None)
+                        label=cfg if (i, j) == (0, 0) else None)
                 if len(seeds) > 1:
                     ax.fill_between(grid, ys.min(0), ys.max(0), color=color, alpha=0.15)
     for i, split in enumerate(("train", "val")):
@@ -63,7 +61,7 @@ def draw(groups: dict, xval, xlabel: str, out: Path) -> None:
                 ax.set_xlabel(xlabel)
     axes[0][0].legend(fontsize=8)
     fig.suptitle("Optimizers on a fixed monarch-wired LUT net (depth 2 x 64K, fan-in 4), "
-                 "CIFAR-10, mean over seeds (band = min-max)")
+                 "CIFAR-10, single seed")
     fig.tight_layout()
     fig.savefig(out, dpi=120)
     plt.close(fig)
@@ -76,7 +74,7 @@ def main() -> None:
         rows = [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
         rows = [r for r in rows if r["samples"] > 0]
         if rows:
-            cfg = f.stem.rsplit("_s", 1)[0] if "_s" in f.stem else f.stem
+            cfg = f.stem.rsplit("_s", 1)[0] if "_s" in f.stem else f.stem  # tolerate legacy _s<seed>
             groups[cfg].append(rows)
     if not groups:
         sys.exit(f"no .jsonl runs in {RUNS}")

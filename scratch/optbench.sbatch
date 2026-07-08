@@ -1,5 +1,5 @@
 #!/bin/bash
-# Optimizer benchmark task array: {bp,cd,mab,rs} x {conn fixed, learnable} x 2 seeds = 16
+# Optimizer benchmark task array: {bp,cd,mab,rs} x {conn fixed, learnable} = 8
 # runs on the identical fixed LUT net (shared DEPTH/WIDTH/fan-in, monarch wiring, full
 # 50k CIFAR-10). One GPU each (any type/node), all 16 in parallel; every run trains the
 # full 2-day walltime cap, then finishes up (final eval incl. test + checkpoint).
@@ -8,7 +8,7 @@
 #   mkdir -p .local/logs scratch/runs && sbatch .local/optbench.sbatch
 #
 #SBATCH --job-name=optbench
-#SBATCH --array=0-15
+#SBATCH --array=0-7
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=22G
@@ -24,11 +24,11 @@ WIDTH=64000
 MINUTES=2865     # ~2 days walltime (gpu.normal cap 2-00:00:00), margin for final eval
 
 METHODS=(bp cd rs mab)
-cfg=$((SLURM_ARRAY_TASK_ID % 8))         # 0-7: method x connection mode
-seed=$((SLURM_ARRAY_TASK_ID / 8))        # 0, 1
+cfg=$SLURM_ARRAY_TASK_ID                  # 0-7: method x connection mode
+seed=0                                    # single seed (per-seed std negligible)
 method=${METHODS[$((cfg % 4))]}
 lc=$((cfg / 4))                          # 0 = frozen monarch wiring, 1 = learnable
-tag="${method}_conn${lc}_s${seed}"
+tag="${method}_conn${lc}"                # no seed in the name (single seed only)
 
 # per-method hyperparameters tuned so each clears 30% val at the shared depth
 case "$method" in
