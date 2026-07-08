@@ -75,25 +75,35 @@ def fit_conv(Xmap: torch.Tensor, y: torch.Tensor, grains: list[int], args) -> li
 @torch.no_grad()
 def apply_conv(Xmap: torch.Tensor, saved: list, args) -> torch.Tensor:
     """Apply the weight-shared conv-forests at every strided position -> per-position argmax
-    one-hot (CLS channels) -> OR-pool 2x2 -> flatten; concat over grains. (B, F_conv) uint8."""
+    one-hot (CLS channels) -> OR-pool 2x2 -> flatten; concat over grains. (B, F_conv) uint8.
+
+    CHUNKED OVER IMAGES: the raw patch tensor for all images at once is huge (OOMs on augmented
+    sets); the pooled output feature maps are small, so we process --img-chunk images at a time
+    and concatenate the small results."""
     dev = Xmap.device
     B = Xmap.shape[0]
-    feats = []
-    for K, trees, alphas in saved:
-        trees = [{k: v.to(dev) for k, v in tr.items()} for tr in trees]  # fit_boost stores on CPU
-        P = patches(Xmap, K, args.conv_stride)            # (B, Ho, Wo, dim)
-        Ho, Wo, dim = P.shape[1], P.shape[2], P.shape[3]
-        Pf = P.reshape(-1, dim)
-        pred = torch.empty(Pf.shape[0], dtype=torch.long, device=dev)
-        for i in range(0, Pf.shape[0], args.apply_chunk):
-            pred[i:i + args.apply_chunk] = ensemble_scores(trees, alphas,
-                                                           Pf[i:i + args.apply_chunk]).argmax(1)
-        oh = torch.zeros(Pf.shape[0], CLS, dtype=torch.uint8, device=dev)
-        oh[torch.arange(Pf.shape[0], device=dev), pred] = 1
-        fmap = oh.view(B, Ho, Wo, CLS).permute(0, 3, 1, 2)   # (B, CLS, Ho, Wo)
-        fmap = F.max_pool2d(fmap.float(), 2, ceil_mode=True).to(torch.uint8)  # OR-pool (transl.)
-        feats.append(fmap.reshape(B, -1))
-    return torch.cat(feats, 1)
+    saved_dev = [(K, [{k: v.to(dev) for k, v in tr.items()} for tr in trees], alphas)
+                 for K, trees, alphas in saved]           # fit_boost stores on CPU; move once
+    outs = []
+    for lo in range(0, B, args.img_chunk):
+        xb = Xmap[lo:lo + args.img_chunk]
+        nb = xb.shape[0]
+        per_grain = []
+        for K, trees, alphas in saved_dev:
+            P = patches(xb, K, args.conv_stride)          # (nb, Ho, Wo, dim)
+            Ho, Wo, dim = P.shape[1], P.shape[2], P.shape[3]
+            Pf = P.reshape(-1, dim)
+            pred = torch.empty(Pf.shape[0], dtype=torch.long, device=dev)
+            for i in range(0, Pf.shape[0], args.apply_chunk):
+                pred[i:i + args.apply_chunk] = ensemble_scores(
+                    trees, alphas, Pf[i:i + args.apply_chunk]).argmax(1)
+            oh = torch.zeros(Pf.shape[0], CLS, dtype=torch.uint8, device=dev)
+            oh[torch.arange(Pf.shape[0], device=dev), pred] = 1
+            fmap = oh.view(nb, Ho, Wo, CLS).permute(0, 3, 1, 2)   # (nb, CLS, Ho, Wo)
+            fmap = F.max_pool2d(fmap.float(), 2, ceil_mode=True).to(torch.uint8)  # OR-pool
+            per_grain.append(fmap.reshape(nb, -1))
+        outs.append(torch.cat(per_grain, 1))
+    return torch.cat(outs, 0)
 
 
 # ==========================================================================================
@@ -109,6 +119,8 @@ def main():
     p.add_argument("--conv-min-leaf", type=int, default=20)
     p.add_argument("--conv-samples", type=int, default=200_000, help="patches to boost each grain")
     p.add_argument("--apply-chunk", type=int, default=400_000)
+    p.add_argument("--img-chunk", type=int, default=8192,
+                   help="images processed at once in apply_conv (bounds patch-tensor memory)")
     p.add_argument("--with-census", type=int, default=1,
                    help="concat boost.build_features flat bits under the head (1) or conv only (0)")
     # head
