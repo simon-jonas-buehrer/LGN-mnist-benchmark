@@ -14,6 +14,10 @@ scratch/grow.log
 
 # the trained checkpoint in results/ is committed on purpose, so it stays tracked.
 
-# large run checkpoints — kept on local disk for re-plot/resume, but exceed GitHub's
-# 100MB file limit, so they must not be committed (strip from history if they slip in).
-tree_scratch/runs/*.pkl
+# RUN OUTPUTS ARE NEVER COMMITTED. Genome/weight checkpoints (.pkl, .pt) blow past GitHub's 100MB
+# limit, and the training curves (.jsonl) churn every eval. They live on local disk for re-plotting
+# and resume-from-checkpoint -- keep them, just don't track them. (Files already tracked from
+# earlier commits stay tracked; `git rm --cached` them if they should go.)
+*.pkl
+*.pt
+*.jsonl
