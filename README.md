@@ -92,14 +92,16 @@ mnistbench/       the harness
   pareto.py       the curve and the leaderboard
   selftest.py     proves emit == synthesize == simulate, bit for bit
 records/
-  sbuehrer/backprop/   learns what each gate IS (truth tables; straight-through sin estimator)
-  sbuehrer/genetic/    learns how the gates are WIRED (fixed NANDs; mutation hill-climbing)
+  sbuehrer/backprop/   gradients (straight-through sin on the truth tables, softmax on the wires)
+  sbuehrer/genetic/    no gradients (fixed NANDs, wiring by mutation hill-climbing)
 docs/RULES.md
 ```
 
-Those two records are deliberately mirror images: same encoder, same head, same gate budget —
-one learns the truth tables and freezes the wiring, the other learns the wiring and freezes the
-truth tables. Beat them.
+The two records share an encoder, a head and a gate budget, and differ in the one thing this
+benchmark is about: whether the optimizer has a gradient. Backprop learns both halves of a gate —
+what it computes and what it reads. The hill-climber learns wiring alone, by mutation, and NAND
+is functionally complete, so it is searching a space that *contains* every circuit backprop can
+express. What separates them on the curve is the search, not the hypothesis class. Beat them.
 
 ## Running the scorer
 

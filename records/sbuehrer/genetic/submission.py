@@ -116,9 +116,10 @@ def margin(votes: torch.Tensor, y: torch.Tensor) -> float:
 
 class GeneticNand(Submission):
     def __init__(self, bits: int, widths: tuple[int, ...], gens: int, k: int = 8,
-                 mut: int = 1, batch: int = 8192, eval_every: int = 1000) -> None:
+                 mut: int = 1, batch: int = 8192, eval_every: int = 2000,
+                 patience: int = 15) -> None:
         self.cfg = dict(bits=bits, widths=tuple(widths), gens=gens, k=k, mut=mut,
-                        batch=batch, eval_every=eval_every)
+                        batch=batch, eval_every=eval_every, patience=patience)
         self.net: NandNet | None = None
 
     # ---- the search ----------------------------------------------------------------
@@ -150,6 +151,7 @@ class GeneticNand(Submission):
         y_va = _t(data.val_y, device)
 
         best_val, best_srcs = -1.0, [s.clone() for s in net.srcs]
+        stale = 0  # evaluations since the last improvement -- the convergence test
         t0 = time.time()
         for gen in range(c["gens"]):
             idx = torch.randint(enc_tr.shape[1], (c["batch"],), generator=g, device=device)
@@ -170,10 +172,16 @@ class GeneticNand(Submission):
             if (gen + 1) % c["eval_every"] == 0 or gen + 1 == c["gens"]:
                 acc = self._accuracy(net, enc_va, y_va)
                 if acc > best_val:
-                    best_val, best_srcs = acc, [s.clone() for s in net.srcs]
+                    best_val, best_srcs, stale = acc, [s.clone() for s in net.srcs], 0
+                else:
+                    stale += 1
                 print(f"  gen {gen + 1:6d}/{c['gens']}  margin {best_fit:+.3f}  "
-                      f"val {acc:.2f}%  (best {best_val:.2f}%)  "
+                      f"val {acc:.2f}%  (best {best_val:.2f}%, stale {stale})  "
                       f"{(gen + 1) / (time.time() - t0):.0f} gen/s", flush=True)
+                if stale >= c["patience"]:  # converged: no new best in patience*eval_every gens
+                    print(f"  early stop at gen {gen + 1}: converged (best {best_val:.2f}%)",
+                          flush=True)
+                    break
 
         net.srcs = best_srcs
         self.net = net
