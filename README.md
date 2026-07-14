@@ -1,113 +1,113 @@
-# LUT-Network Tutorial: boolean logic gates trained by gradient descent
+# mnistbench — benchmark optimizers by the silicon their solutions cost
 
+Optimizers get compared on different architectures, and the comparison never means much: one
+paper counts parameters, another counts "gates" (before synthesis), another counts FLOPs. This
+repo fixes one task, one dataset and one cost axis, and lets any optimizer compete on it.
 
-*Hi Branton this Tutorial is for you!*
+**You submit a training procedure and a circuit. We measure the circuit.**
 
-In bad fashion I made this tutorial with Claude, but i personaly reviewed *all* of it and its fine.
+|  | |
+|---|---|
+| **task** | MNIST, fixed 54k / 6k / 10k train / val / test split |
+| **y-axis** | test accuracy, measured by **simulating your synthesized netlist** gate by gate |
+| **x-axis** | circuit size in **gate equivalents (GE)**: `yosys`+`ABC` map your Verilog to sky130 standard cells; GE = area / area of a NAND2 |
+| **result** | a Pareto curve — for a given amount of silicon, whose optimizer finds the best circuit? |
 
-A tiny, self-contained introduction to Look-Up Table (LUT) networks: neural networks whose
-neurons are learnable boolean logic gates instead of weighted sums. Everything is pure
-PyTorch, there are no custom CUDA kernels, and the model is about 200 lines you can read in
-one sitting.
+Everything your model does at inference lives inside the circuit and is counted: the binarizer,
+the learned logic, the readout, the argmax. No free preprocessing, no free softmax. That is what
+lets a LUT net, a quantized MLP and a boosted tree land on the same axis honestly.
 
-We train it on CIFAR-10 with no regularization and no data augmentation, so you can watch it
-overfit: training accuracy keeps pulling ahead while validation and test accuracy stall.
+![Pareto curve](results/pareto.png)
 
-## What is a LUT network?
+The two reference records already make the point. Below ~15k gate equivalents the **genetic**
+search owns the frontier — its NAND-only circuits map to cheaper cells, and learned wiring wastes
+fewer gates than backprop's frozen random wiring. Above it, **backprop** pulls away and keeps
+climbing to 93%, while the hill-climber flatlines at ~81% no matter how many gates you hand it.
+Neither record could have shown that by reporting its own parameter count; it only appears once
+both are charged for the same silicon.
 
-A normal neuron computes `sigma(w*x + b)`, a weighted sum of all of its inputs. A LUT neuron
-does something different:
+## Leaderboard
 
-1. it reads a small, fixed number of input bits (here the fan-in is 2), and
-2. it applies a learned 2-input boolean function to them, stored as a 4-entry truth table.
+<!-- LEADERBOARD -->
+| | record | point | gate equivalents | area (um^2) | depth | MNIST test acc |
+|---|---|---|---|---|---|---|
+| * | `sbuehrer/backprop` | xl | 147,291 | 552,870 | 280 | **93.02%** |
+| * | `sbuehrer/backprop` | l | 47,341 | 177,700 | 234 | **89.60%** |
+| * | `sbuehrer/backprop` | m | 29,737 | 111,622 | 235 | **85.23%** |
+| * | `sbuehrer/genetic` | m | 9,505 | 35,678 | 192 | **81.36%** |
+|  | `sbuehrer/genetic` | l | 19,952 | 74,891 | 207 | **81.05%** |
+| * | `sbuehrer/genetic` | s | 4,061 | 15,242 | 153 | **80.35%** |
+|  | `sbuehrer/backprop` | s | 6,893 | 25,875 | 186 | **74.15%** |
+| * | `sbuehrer/genetic` | xs | 1,935 | 7,262 | 128 | **60.69%** |
+| * | `sbuehrer/backprop` | xs | 1,702 | 6,387 | 134 | **58.39%** |
 
-A 2-input truth table has `2^2 = 4` entries `f(0,0), f(0,1), f(1,0), f(1,1)`. Four free bits
-are enough to express all 16 boolean functions of two inputs (AND, OR, XOR, NAND, "pass A",
-"constant 0", and so on), so each neuron learns which logic gate it should be. Stack a few
-layers and you get a deep combinational logic circuit. It trains by SGD and maps directly onto
-the LUTs inside an FPGA or ASIC at inference time.
+`*` = on the Pareto frontier (nothing is both smaller and more accurate).
+<!-- /LEADERBOARD -->
 
-The full pipeline, where every signal between layers is a single bit:
+## The contract
 
+```verilog
+module top (input [6271:0] pix, output [3:0] cls);   // combinational; no clock, no memory
 ```
-image (3x32x32 pixels)
-  -> Thermometer encoder    real pixel -> a few threshold bits
-  -> Flatten
-  -> N x LUTLayer           each neuron = a learned 2-input gate (fan-in 2)
-  -> GroupSum head          popcount the final bits into 10 class scores
-  -> logits
-```
 
-## How do you backprop through a boolean gate?
+`pix[8*p +: 8]` is pixel `p` as a raw uint8 (row-major, `p = 0..783`); `cls` is the predicted
+digit. Full rules in [docs/RULES.md](docs/RULES.md).
 
-You cannot differentiate `1[sin(z) > 0]`. The fix is a straight-through estimator, built on
-the light parametrization with a `sin` activation:
+## Submit
 
 ```python
-hard = (sin(z) > 0)            # exact 0/1, used in the forward pass
-soft = 0.5 + 0.5*sin(z)        # smooth, used for the gradient
-bit  = hard + (soft - soft.detach())   # forward = hard, backward = d(soft)
+# records/<you>/<method>/submission.py
+POINTS = [{"name": "s", ...}, {"name": "l", ...}]    # one dict per point on your curve
+
+class Mine(Submission):
+    def train(self, data, *, device, seed): ...      # data.train_x is (54000, 784) uint8 numpy
+    def emit_verilog(self) -> str: ...               # the trained model, as `module top`
+    def predict(self, pix): ...                      # numpy in, numpy out; must equal the verilog
+
+def build(**point) -> Submission: return Mine(**point)
 ```
-
-Each of a neuron's 4 truth-table bits is stored as a real latent `z`. The forward pass is an
-exact boolean circuit, so `train` and `eval` agree bit-for-bit, while the backward pass flows
-a smooth `sin` gradient that nudges each latent toward 0 or 1. Because `sin` is periodic the
-latent never saturates and always has a gradient, unlike a sigmoid. The gate itself is
-evaluated with the multilinear form of a 2-input LUT (see `LUTLayer.forward` in
-[`model.py`](model.py)).
-
-## Files
-
-| file          | what it is                                                        |
-|---------------|-------------------------------------------------------------------|
-| `model.py`    | the whole network: sin activation, `LUTLayer`, thermometer, head  |
-| `train.py`    | CIFAR-10 loader (no torchvision) plus the training loop and plots |
-| `load.py`     | reload the saved checkpoint, evaluate it, inspect a learned gate  |
-| `results/`    | the committed run: `train.log`, `metrics.csv`, `curves.png`, `lut_cifar10.pt` |
-
-## Setup (uv)
 
 ```bash
-# install uv once: https://docs.astral.sh/uv/
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-cd lut-tutorial
-uv sync          # creates .venv with torch + numpy + matplotlib (CPU or CUDA, picked automatically)
+python -m mnistbench run records/<you>/<method>   # train -> synthesize -> simulate -> results.json
+python -m mnistbench pareto                       # redraw the curve and the table
 ```
 
-## Run
+The harness imports **numpy and nothing else** — write your model in PyTorch, JAX, TensorFlow or
+raw bit-twiddling; all we ever see is arrays and Verilog. If your model is a fan-in-2 logic net
+(most are), `mnistbench/hw.py` emits the Verilog for you.
+
+A point whose `predict()` disagrees with its own circuit on even one image is rejected, so the
+accuracy on the board is always the accuracy of the hardware.
+
+## What's here
+
+```
+mnistbench/       the harness
+  data.py         MNIST as uint8 numpy, fixed split
+  spec.py         the Submission API — the whole contract
+  hw.py           verilog emitters: thermometer encoder, fan-in-2 LUT layers, popcount + argmax
+  synth.py        yosys + ABC -> sky130 area (x-axis) and a NAND netlist
+  netlist.py      bit-packed simulator, 64 images per uint64 word (y-axis)
+  bench.py        train -> emit -> synth -> simulate -> results.json
+  pareto.py       the curve and the leaderboard
+  selftest.py     proves emit == synthesize == simulate, bit for bit
+records/
+  sbuehrer/backprop/   learns what each gate IS (truth tables; straight-through sin estimator)
+  sbuehrer/genetic/    learns how the gates are WIRED (fixed NANDs; mutation hill-climbing)
+docs/RULES.md
+```
+
+Those two records are deliberately mirror images: same encoder, same head, same gate budget —
+one learns the truth tables and freezes the wiring, the other learns the wiring and freezes the
+truth tables. Beat them.
+
+## Running the scorer
+
+Scoring needs `yosys` (with ABC) and the sky130 liberty — not pip-installable:
 
 ```bash
-# Train on the full CIFAR-10 training set (downloads the data on first run). A GPU is
-# recommended; on a laptop CPU use e.g. --train-size 2000 --width 4000 --layers 2 --epochs 30.
-uv run python train.py --download
-
-# Reload the trained checkpoint, check test accuracy, peek at a learned gate
-uv run python load.py
+conda create -n eda -c conda-forge -c litex-hub yosys open_pdks.sky130a
+export MNISTBENCH_YOSYS=.../eda/bin/yosys
+export MNISTBENCH_LIBERTY=.../sky130_fd_sc_hd__tt_025C_1v80.lib
+python -m mnistbench.selftest     # emit -> synthesize -> simulate, bit-exact
 ```
-
-Data is split the conventional way. The training set is split 90/10 into train and validation,
-and the standard 10k CIFAR-10 test set is kept separate. The thermometer thresholds are fit on
-training data only, so there is no leakage.
-
-Every epoch prints train, validation and test loss, accuracy and perplexity, and the run
-writes `results/train.log`, `results/metrics.csv`, `results/curves.png` and the checkpoint
-`results/lut_cifar10.pt`. The committed `results/` come from training a large model (width
-200000, 6 layers, about 1.2M trainable tables) on the full set for 100 epochs with no
-regularization, on a single RTX 3090:
-
-```bash
-uv run python train.py --device cuda --train-size 0 --num-bits 3 --width 200000 --layers 6 --batch-size 1024 --lr 2e-2 --epochs 100
-```
-
-![learning curves](results/curves.png)
-
-Train accuracy and perplexity keep improving while validation and test stall. That gap is
-overfitting, which is the whole point of training with no regularization and no augmentation.
-A larger model has more capacity, fits the training set harder, and widens the gap.
-
-## Knobs to play with
-
-See `train.py --help`. The main ones are `--num-bits` (thermometer resolution), `--width` and
-`--layers` (capacity; wider overfits harder, and a handful of layers is usually enough), plus
-`--train-size`, `--lr` and `--epochs`.

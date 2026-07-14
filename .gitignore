@@ -1,23 +1,18 @@
-# python / uv
+# python
 .venv/
 __pycache__/
 *.pyc
 .ruff_cache/
 .pytest_cache/
 
-# data (CIFAR-10 is downloaded, not committed)
+# MNIST is downloaded on first run, not committed
 data/
 
-# local scratch and cluster logs
+# local scratch and cluster job logs
 .local/
-scratch/grow.log
 
-# the trained checkpoint in results/ is committed on purpose, so it stays tracked.
-
-# RUN OUTPUTS ARE NEVER COMMITTED. Genome/weight checkpoints (.pkl, .pt) blow past GitHub's 100MB
-# limit, and the training curves (.jsonl) churn every eval. They live on local disk for re-plotting
-# and resume-from-checkpoint -- keep them, just don't track them. (Files already tracked from
-# earlier commits stay tracked; `git rm --cached` them if they should go.)
-*.pkl
+# Generated Verilog: big, and it regenerates from submission.py + the seed. results.json is the
+# record of what was measured, and IS committed -- along with the Pareto plot in results/.
+records/*/*/artifacts/
 *.pt
-*.jsonl
+*.pkl

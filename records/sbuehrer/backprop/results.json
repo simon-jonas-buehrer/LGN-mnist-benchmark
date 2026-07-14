@@ -1,0 +1,108 @@
+{
+  "record": "sbuehrer/backprop",
+  "title": "backprop (learned truth tables, frozen random wiring)",
+  "points": [
+    {
+      "name": "xs",
+      "bits": 1,
+      "widths": [
+        320,
+        160
+      ],
+      "epochs": 30,
+      "ge": 1701.7,
+      "area_um2": 6387.4,
+      "cells": 1185,
+      "nand": 1282,
+      "inv": 790,
+      "depth": 134,
+      "test_acc": 58.39,
+      "val_acc": 56.02,
+      "train_s": 39,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "s",
+      "bits": 1,
+      "widths": [
+        1280,
+        640
+      ],
+      "epochs": 30,
+      "ge": 6893.3,
+      "area_um2": 25874.8,
+      "cells": 4661,
+      "nand": 5412,
+      "inv": 3149,
+      "depth": 186,
+      "test_acc": 74.15,
+      "val_acc": 72.6,
+      "train_s": 39,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "m",
+      "bits": 3,
+      "widths": [
+        5120,
+        2560
+      ],
+      "epochs": 40,
+      "ge": 29737.3,
+      "area_um2": 111622.1,
+      "cells": 20134,
+      "nand": 23655,
+      "inv": 13300,
+      "depth": 235,
+      "test_acc": 85.23,
+      "val_acc": 84.12,
+      "train_s": 53,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "l",
+      "bits": 3,
+      "widths": [
+        16000,
+        8000,
+        4000
+      ],
+      "epochs": 40,
+      "ge": 47341.3,
+      "area_um2": 177700.4,
+      "cells": 32201,
+      "nand": 39215,
+      "inv": 21043,
+      "depth": 234,
+      "test_acc": 89.6,
+      "val_acc": 88.85,
+      "train_s": 96,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "xl",
+      "bits": 7,
+      "widths": [
+        48000,
+        24000,
+        12000
+      ],
+      "epochs": 50,
+      "ge": 147290.7,
+      "area_um2": 552870.2,
+      "cells": 99126,
+      "nand": 121630,
+      "inv": 62210,
+      "depth": 280,
+      "test_acc": 93.02,
+      "val_acc": 92.95,
+      "train_s": 277,
+      "device": "cuda",
+      "seed": 0
+    }
+  ]
+}

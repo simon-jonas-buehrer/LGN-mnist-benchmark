@@ -1,0 +1,93 @@
+{
+  "record": "sbuehrer/genetic",
+  "title": "genetic (learned wiring, all gates NAND)",
+  "points": [
+    {
+      "name": "xs",
+      "bits": 1,
+      "widths": [
+        256,
+        256,
+        160
+      ],
+      "gens": 20000,
+      "ge": 1934.7,
+      "area_um2": 7262.0,
+      "cells": 1395,
+      "nand": 1487,
+      "inv": 657,
+      "depth": 128,
+      "test_acc": 60.69,
+      "val_acc": 60.42,
+      "train_s": 128,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "s",
+      "bits": 1,
+      "widths": [
+        1024,
+        1024,
+        320
+      ],
+      "gens": 30000,
+      "ge": 4060.7,
+      "area_um2": 15242.1,
+      "cells": 2867,
+      "nand": 3217,
+      "inv": 1305,
+      "depth": 153,
+      "test_acc": 80.35,
+      "val_acc": 77.92,
+      "train_s": 366,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "m",
+      "bits": 3,
+      "widths": [
+        2048,
+        2048,
+        2048,
+        640
+      ],
+      "gens": 40000,
+      "ge": 9505.0,
+      "area_um2": 35678.0,
+      "cells": 6522,
+      "nand": 7997,
+      "inv": 4150,
+      "depth": 192,
+      "test_acc": 81.36,
+      "val_acc": 79.73,
+      "train_s": 1101,
+      "device": "cuda",
+      "seed": 0
+    },
+    {
+      "name": "l",
+      "bits": 3,
+      "widths": [
+        4096,
+        4096,
+        4096,
+        4096,
+        1280
+      ],
+      "gens": 40000,
+      "ge": 19951.7,
+      "area_um2": 74890.6,
+      "cells": 13949,
+      "nand": 17085,
+      "inv": 7539,
+      "depth": 207,
+      "test_acc": 81.05,
+      "val_acc": 79.75,
+      "train_s": 2393,
+      "device": "cuda",
+      "seed": 0
+    }
+  ]
+}
