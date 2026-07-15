@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parent.parent
 RECORDS = ROOT / "records"
 RESULTS = ROOT / "results"
@@ -44,48 +46,22 @@ def frontier(points: list[dict]) -> list[dict]:
     return sorted(front, key=lambda p: p["ge"])
 
 
-def plot(points: list[dict], out: Path) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _new_ax(plt, title: str, ylabel: str):
     import matplotlib.ticker as ticker
-
-    front = {(p["record"], p["name"]) for p in frontier(points)}
-    records = sorted({p["record"] for p in points})
 
     fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
     fig.patch.set_facecolor(SURFACE)
     ax.set_facecolor(SURFACE)
-
-    # the frontier itself: a staircase behind the series, in ink, not in a series colour
-    fr = frontier(points)
-    if len(fr) > 1:
-        ax.step(
-            [p["ge"] for p in fr], [p["test_acc"] for p in fr],
-            where="post", color=MUTED, lw=6, alpha=0.55, zorder=1, solid_capstyle="round",
-            label="Pareto frontier",
-        )
-
-    for i, rec in enumerate(records):
-        ps = sorted([p for p in points if p["record"] == rec], key=lambda p: p["ge"])
-        c = SERIES[i % len(SERIES)]
-        ax.plot([p["ge"] for p in ps], [p["test_acc"] for p in ps],
-                color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
-        on = [p for p in ps if (p["record"], p["name"]) in front]
-        ax.plot([p["ge"] for p in on], [p["test_acc"] for p in on], ls="none", marker="o",
-                ms=8, mfc=c, mec=INK, mew=1.6, zorder=4)
-
     ax.set_xscale("log")
     # label 1/2/5 per decade in plain numbers -- "10^4" tells a reader nothing about a gate budget
-    ax.xaxis.set_major_locator(ticker.LogLocator(base=10, subs=(1.0, 2.0, 5.0), numticks=20))
+    ax.xaxis.set_major_locator(ticker.LogLocator(base=10, subs=(1.0, 2.0, 5.0), numticks=30))
     ax.xaxis.set_minor_locator(ticker.NullLocator())
-    ax.xaxis.set_major_formatter(
-        ticker.FuncFormatter(lambda v, _: f"{v / 1000:g}k" if v >= 1000 else f"{v:g}")
-    )
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(
+        lambda v, _: f"{v/1e9:g}B" if v >= 1e9 else f"{v/1e6:g}M" if v >= 1e6
+        else f"{v/1e3:g}k" if v >= 1e3 else f"{v:g}"))
     ax.set_xlabel("circuit size  (gate equivalents, sky130)", color=INK2, fontsize=10)
-    ax.set_ylabel("MNIST test accuracy  (%)", color=INK2, fontsize=10)
-    ax.set_title("MNIST at a fixed silicon budget", color=INK, fontsize=13, loc="left", pad=12)
+    ax.set_ylabel(ylabel, color=INK2, fontsize=10)
+    ax.set_title(title, color=INK, fontsize=13, loc="left", pad=12)
     ax.grid(True, which="both", color=MUTED, alpha=0.25, lw=0.6)
     ax.set_axisbelow(True)
     for s in ("top", "right"):
@@ -93,29 +69,97 @@ def plot(points: list[dict], out: Path) -> None:
     for s in ("left", "bottom"):
         ax.spines[s].set_color(MUTED)
     ax.tick_params(colors=INK2, labelsize=9)
-    ax.legend(frameon=False, loc="lower right", fontsize=9, labelcolor=INK2)
+    return fig, ax
 
+
+def _save(fig, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(out, facecolor=SURFACE)
     print(f"wrote {out}")
 
 
+def plot_accuracy(points: list[dict], out: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    records = sorted({p["record"] for p in points})
+    fig, ax = _new_ax(plt, "MNIST accuracy at a fixed silicon budget", "MNIST test accuracy  (%)")
+    for i, rec in enumerate(records):
+        ps = sorted([p for p in points if p["record"] == rec], key=lambda p: p["ge"])
+        c = SERIES[i % len(SERIES)]
+        ax.plot([p["ge"] for p in ps], [p["test_acc"] for p in ps],
+                color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
+    ax.legend(frameon=False, loc="lower right", fontsize=9, labelcolor=INK2)
+    _save(fig, out)
+
+
+def plot_loss(points: list[dict], out: Path, extrapolate_to: float = 1e9) -> None:
+    """Cross-entropy vs gate equivalents, log-log. Measured points are drawn solid; a power-law fit
+    to each record's measured points is extended as a DASHED trendline into the region we cannot
+    synthesise (past the largest measured circuit), and the plot says so."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+
+    pts = [p for p in points if p.get("test_ce") is not None]
+    if not pts:
+        return
+    records = sorted({p["record"] for p in pts})
+    fig, ax = _new_ax(plt, "MNIST loss at a fixed silicon budget  (log-log)",
+                      "MNIST test cross-entropy  (log)")
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(ticker.LogLocator(base=10, subs=(1.0, 2.0, 3.0, 5.0), numticks=30))
+    ax.yaxis.set_minor_locator(ticker.NullLocator())
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+
+    max_measured = max(p["ge"] for p in pts)
+    for i, rec in enumerate(records):
+        ps = sorted([p for p in pts if p["record"] == rec], key=lambda p: p["ge"])
+        c = SERIES[i % len(SERIES)]
+        ge = np.array([p["ge"] for p in ps], float)
+        ce = np.array([p["test_ce"] for p in ps], float)
+        ax.plot(ge, ce, color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
+        # power law CE = A * GE^b  <=>  line in log-log; extend it past the last real point
+        if len(ps) >= 2:
+            b, a = np.polyfit(np.log(ge), np.log(ce), 1)
+            xs = np.geomspace(ge[-1], extrapolate_to, 50)
+            ax.plot(xs, np.exp(a) * xs**b, color=c, lw=1.6, ls=(0, (5, 3)), alpha=0.7, zorder=2)
+
+    # a shaded curtain + boundary that says, unmistakably, where measurement stops and fit begins
+    xhi = ax.get_xlim()[1]
+    ax.axvspan(max_measured, xhi, color=MUTED, alpha=0.12, zorder=0)
+    ax.axvline(max_measured, color=INK2, lw=1, ls=":", alpha=0.7, zorder=1)
+    ymax = ax.get_ylim()[1]
+    ax.text(max_measured * 1.3, ymax, "  extrapolated (power-law fit,\n  not synthesised)",
+            color=INK2, fontsize=8.5, va="top", ha="left")
+    ax.text(max_measured / 1.3, ymax, "measured  ", color=INK2, fontsize=8.5,
+            va="top", ha="right")
+    ax.legend(frameon=False, loc="lower left", fontsize=9, labelcolor=INK2)
+    _save(fig, out)
+
+
 def table(points: list[dict]) -> str:
     front = {(p["record"], p["name"]) for p in frontier(points)}
     rows = sorted(points, key=lambda p: (-p["test_acc"], p["ge"]))
     lines = [
-        "| | record | point | gate equivalents | area (um^2) | depth | MNIST test acc |",
+        "| | record | point | gate equivalents | depth | MNIST test acc | test CE |",
         "|---|---|---|---|---|---|---|",
     ]
     for p in rows:
         star = "*" if (p["record"], p["name"]) in front else ""
+        ce = f"{p['test_ce']:.3f}" if p.get("test_ce") is not None else "--"
         lines.append(
-            f"| {star} | `{p['record']}` | {p['name']} | {p['ge']:,.0f} | {p['area_um2']:,.0f} "
-            f"| {p['depth']} | **{p['test_acc']:.2f}%** |"
+            f"| {star} | `{p['record']}` | {p['name']} | {p['ge']:,.0f} "
+            f"| {p['depth']} | **{p['test_acc']:.2f}%** | {ce} |"
         )
     lines.append("")
-    lines.append("`*` = on the Pareto frontier (nothing is both smaller and more accurate).")
+    lines.append("`*` = on the Pareto frontier (nothing is both smaller and more accurate). "
+                 "test CE = temperature-calibrated cross-entropy over the circuit's class votes.")
     return "\n".join(lines)
 
 
@@ -124,7 +168,8 @@ def main() -> None:
     if not points:
         raise SystemExit("no results yet -- run `python -m mnistbench run records/<user>/<method>`")
     RESULTS.mkdir(exist_ok=True)
-    plot(points, RESULTS / "pareto.png")
+    plot_accuracy(points, RESULTS / "pareto_acc.png")
+    plot_loss(points, RESULTS / "pareto_loss.png")
     md = table(points)
     (RESULTS / "leaderboard.md").write_text(md + "\n")
 

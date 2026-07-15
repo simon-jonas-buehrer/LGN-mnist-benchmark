@@ -228,6 +228,27 @@ class BackpropLut(Submission):
         out = [m(x[i : i + ch]).argmax(1).cpu() for i in range(0, len(x), ch)]
         return torch.cat(out).numpy()  # ties -> lowest class, same as the emitted argmax
 
+    @torch.no_grad()
+    def scores(self, pix: np.ndarray) -> np.ndarray:
+        """Per-class firing fraction in [0, 1]: of each class's readout gates, how many fired.
+
+        m.forward returns the same group sums scaled by a constant, so its argmax matches; here we
+        want the raw fraction (mean of the group's hard bits) for a scale-honest cross-entropy.
+        """
+        m = self.model
+        dev = next(m.parameters()).device
+        x = _t(pix, dev)
+        ch = self._chunk()
+        out = []
+        for i in range(0, len(x), ch):
+            sig = m.encode(x[i : i + ch])
+            for layer in m.layers:
+                sig = torch.cat([sig, layer(sig)], dim=1)
+            last = sig[:, -m.widths[-1] :]
+            frac = last.reshape(last.shape[0], N_CLASSES, -1).mean(-1)  # (B, 10) in [0, 1]
+            out.append(frac.cpu())
+        return torch.cat(out).numpy()
+
     def emit_verilog(self) -> str:
         m = self.model
         layers = []

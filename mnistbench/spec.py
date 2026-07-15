@@ -44,3 +44,15 @@ class Submission(ABC):
         test images and rejects the point if they differ on even one of them -- not to police
         you, but because the check catches the bug that otherwise silently costs you accuracy.
         """
+
+    def scores(self, pix: np.ndarray) -> np.ndarray | None:
+        """(N, 784) uint8 -> (N, 10) per-class scores in [0, 1], or None if you don't provide them.
+
+        A gate circuit outputs a hard class, so there is no probability to take a cross-entropy of
+        -- except that the readout, just before the argmax, holds one integer per class: how many
+        of that class's gates fired. Divided by the group size that is a firing FRACTION in [0, 1],
+        and its argmax is exactly `predict()` (the groups are equal size), so it is the circuit's
+        own signal, not an invented one. The harness softmaxes these into the cross-entropy on the
+        y-axis. Return None to sit out that axis (you still get accuracy).
+        """
+        return None

@@ -230,6 +230,18 @@ class GeneticNand(Submission):
             out.append(v.argmax(1).cpu())  # ties -> lowest class, same as the emitted argmax
         return torch.cat(out).numpy()
 
+    @torch.no_grad()
+    def scores(self, pix: np.ndarray) -> np.ndarray:
+        """Per-class firing fraction in [0, 1]: votes() counts, divided by the gates per group."""
+        net = self.net
+        g = net.widths[-1] // N_CLASSES  # readout gates per class
+        enc = self._encode(_t(pix, net.device), net)
+        out = []
+        for i in range(0, enc.shape[1], 4096):
+            v = net.votes(net.forward(enc[:, i : i + 4096])) / g  # (B, 10) in [0, 1]
+            out.append(v.cpu())
+        return torch.cat(out).numpy()
+
     def emit_verilog(self) -> str:
         net = self.net
         layers = [

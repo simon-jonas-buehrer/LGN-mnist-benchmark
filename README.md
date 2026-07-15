@@ -19,10 +19,11 @@ lets a LUT net, a quantized MLP and a boosted tree land on the same axis honestl
 
 ![Pareto curve](results/pareto.png)
 
-The two reference records already make the point, and they cross. Below a few thousand gate
-equivalents the **genetic** search owns the frontier — its NAND-only circuits map to cheaper
-cells, and at that size wiring is most of what matters, which is all it learns. Above ~7k GE
-**backprop** takes over and keeps climbing to **96.9%**, while the hill-climber tops out near 87%.
+The two reference records already make the point, and on the log-log error curve they visibly
+cross near **5k gate equivalents**. Below that the **genetic** search is ahead — its NAND-only
+circuits map to cheaper cells, and at that size wiring is most of what matters, which is all it
+learns. Above it **backprop** pulls away: its error falls as a near-straight power law in gates
+down to **3.1%** (96.9% accuracy), while the hill-climber bends and flattens near 13% (87%).
 Neither record could have shown that by reporting its own parameter count; it only appears once
 both are charged for the same silicon.
 

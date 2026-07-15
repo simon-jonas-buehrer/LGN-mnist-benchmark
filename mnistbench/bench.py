@@ -28,6 +28,25 @@ from .data import Mnist, to_bits
 CHECK_SAMPLES = 512
 
 
+def _cross_entropy(logits: np.ndarray, y: np.ndarray) -> float:
+    """Mean softmax cross-entropy of (N, 10) logits against labels y."""
+    z = logits - logits.max(1, keepdims=True)
+    logp = z - np.log(np.exp(z).sum(1, keepdims=True))
+    return float(-logp[np.arange(len(z)), y].mean())
+
+
+def _fit_temperature(scores: np.ndarray, y: np.ndarray) -> float:
+    """Scalar T > 0 minimising CE(scores / T, y). Coarse-to-fine over log T; CE is unimodal in T,
+    and any T > 0 preserves the argmax, so calibration never changes the predicted class."""
+    lo, hi = 1e-3, 1e2
+    for _ in range(6):  # ~40x zoom per pass, converges to a tight bracket
+        grid = np.geomspace(lo, hi, 40)
+        ces = [_cross_entropy(scores / t, y) for t in grid]
+        j = int(np.argmin(ces))
+        lo, hi = grid[max(0, j - 1)], grid[min(len(grid) - 1, j + 1)]
+    return float(np.sqrt(lo * hi))
+
+
 def load_record(path: Path) -> ModuleType:
     sub = path / "submission.py"
     if not sub.exists():
@@ -116,8 +135,24 @@ def run_point(mod: ModuleType, point: dict, data: Mnist, *, device: str, seed: i
         )
 
     val_acc = float((np.asarray(model.predict(data.val_x)) == data.val_y).mean()) * 100
-    return {**point, **m, "val_acc": round(val_acc, 2), "train_s": round(train_s),
-            "device": device, "seed": seed}
+    out = {**point, **m, "val_acc": round(val_acc, 2), "train_s": round(train_s),
+           "device": device, "seed": seed}
+
+    # cross-entropy over the readout's per-class firing fractions (see Submission.scores). Faithful
+    # to the circuit: the fractions are the popcount groups the netlist computes, and their argmax
+    # is the class the netlist emits -- the equivalence check above already pins that down.
+    sc_va = model.scores(data.val_x)
+    sc_te = model.scores(data.test_x)
+    if sc_te is not None:
+        # The raw fractions live in a narrow band (a NAND net's gates mostly fire), so softmax over
+        # them is near-uniform and CE would read ~ln(10) no matter the accuracy. So temperature-
+        # scale: fit ONE scalar T on val to minimise CE, then report test CE at that T. T > 0 can't
+        # move an argmax, so the calibrated class is still exactly the circuit's -- this is the
+        # circuit's own votes, reported at their best-calibrated confidence, not an invented signal.
+        t = _fit_temperature(np.asarray(sc_va, float), data.val_y)
+        out["test_ce"] = round(_cross_entropy(np.asarray(sc_te, float) / t, data.test_y), 4)
+        out["ce_temp"] = round(float(t), 4)
+    return out
 
 
 def merge_record(record: Path) -> None:
