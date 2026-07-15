@@ -90,6 +90,29 @@
       "seed": 0,
       "test_ce": 0.152,
       "ce_temp": 0.0319
+    },
+    {
+      "name": "xl",
+      "bits": 7,
+      "widths": [
+        48000,
+        24000,
+        12000
+      ],
+      "epochs": 120,
+      "ge": 156860.7,
+      "area_um2": 588792.2,
+      "cells": 104298,
+      "nand": 129843,
+      "inv": 64875,
+      "depth": 285,
+      "test_acc": 96.93,
+      "val_acc": 96.42,
+      "train_s": 4522,
+      "device": "cuda",
+      "seed": 0,
+      "test_ce": 0.1016,
+      "ce_temp": 0.0198
     }
   ]
 }
