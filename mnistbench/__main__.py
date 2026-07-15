@@ -27,11 +27,17 @@ def main() -> None:
     s = sub.add_parser("rescore", help="re-measure stored .sv artifacts without retraining")
     s.add_argument("record", type=Path)
 
+    g = sub.add_parser("merge", help="rebuild results.json from per-point files (after a "
+                                     "parallel run, where each point ran as its own job)")
+    g.add_argument("record", type=Path)
+
     sub.add_parser("pareto", help="rebuild the Pareto plot and the leaderboard table")
 
     args = p.parse_args()
     if args.cmd == "pareto":
         return pareto.main()
+    if args.cmd == "merge":
+        return bench.merge_record(args.record)
 
     d = data.load()
     print(f"MNIST: train {d.train_x.shape}, val {d.val_x.shape}, test {d.test_x.shape}",

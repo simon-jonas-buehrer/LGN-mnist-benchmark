@@ -23,9 +23,24 @@ Three details that are not cosmetic:
     batch drowns that signal in sampling noise and selection picks the luckier mutant instead
     of the better one. Measured on the `xs` point, 20k generations, everything else equal:
     batch 1024 -> 22.6%, batch 4096 -> 24.9%, **batch 8192 -> 60.4%**. This one number is worth
-    more than any amount of cleverness elsewhere in the search.
+    more than any amount of cleverness elsewhere in the search. It does saturate, though -- on
+    `m`: 8192 -> 78.7%, 16384 -> 79.6%, 32768 -> 79.6%. 16384 is the knee, and past it you are
+    paying 2x the time per generation for nothing.
   * DELTA FORWARD. A mutant differs from the incumbent only from its lowest mutated layer
     upward, so everything below that is reused. Cheap, exact, and it is most of the speed.
+  * GENERATIONS ARE THE SCARCE RESOURCE, so spend them on generations. `k` (mutants per
+    generation) trades throughput for a better pick each step, and there is an interior optimum:
+    on `m`, k=4 -> 82.3% (59 gen/s), **k=8 -> 83.3% (32 gen/s)**, k=16 -> 81.4% (10 gen/s, and
+    still climbing when it ran out of time -- it is not worse, it is just slower per step, which
+    is the same thing when the budget is wall-clock). Likewise mut=1 beats mut=2 and mut=4.
+
+WHAT THE CAP WAS HIDING. This record used to stop at 20k-40k generations and report ~81%, and
+the curve was read as "the hill-climber plateaus at 81% no matter how many gates you give it".
+That was false, and it was an artifact of the cap: every point was still finding new bests when
+the generation budget ran out. Given room to converge, `m` reaches 83.3%. The lesson is not that
+the GA is secretly good -- it still loses badly to backprop per gate -- but that a stopping rule
+you chose for convenience will happily masquerade as a property of the algorithm. Every point
+here now runs until it stops improving (patience), never to a fixed generation count.
 
 No gradients are involved anywhere. This is here to be beaten -- and to make visible what the
 gate count of a hill-climbed circuit looks like next to a differentiated one.
@@ -50,11 +65,14 @@ TITLE = "genetic (learned wiring, all gates NAND)"
 
 NAND_TT = 0b0111  # bit (2a+b) of ~(a & b): f(0,0)=f(0,1)=f(1,0)=1, f(1,1)=0
 
+# `gens` is a CEILING, not a target. Training stops when validation has not improved for
+# `patience` evaluations, so each point runs to its own convergence. The old caps (20k-40k) were
+# the single biggest lie in this record: every point was still climbing when it hit them.
 POINTS = [
-    {"name": "xs", "bits": 1, "widths": (256, 256, 160), "gens": 20000},
-    {"name": "s", "bits": 1, "widths": (1024, 1024, 320), "gens": 30000},
-    {"name": "m", "bits": 3, "widths": (2048, 2048, 2048, 640), "gens": 40000},
-    {"name": "l", "bits": 3, "widths": (4096, 4096, 4096, 4096, 1280), "gens": 40000},
+    {"name": "xs", "bits": 1, "widths": (256, 256, 160), "gens": 1000000},
+    {"name": "s", "bits": 1, "widths": (1024, 1024, 320), "gens": 1000000},
+    {"name": "m", "bits": 3, "widths": (2048, 2048, 2048, 640), "gens": 1000000},
+    {"name": "l", "bits": 3, "widths": (4096, 4096, 4096, 4096, 1280), "gens": 1000000},
 ]
 
 
@@ -116,8 +134,8 @@ def margin(votes: torch.Tensor, y: torch.Tensor) -> float:
 
 class GeneticNand(Submission):
     def __init__(self, bits: int, widths: tuple[int, ...], gens: int, k: int = 8,
-                 mut: int = 1, batch: int = 8192, eval_every: int = 2000,
-                 patience: int = 15) -> None:
+                 mut: int = 1, batch: int = 16384, eval_every: int = 5000,
+                 patience: int = 20) -> None:
         self.cfg = dict(bits=bits, widths=tuple(widths), gens=gens, k=k, mut=mut,
                         batch=batch, eval_every=eval_every, patience=patience)
         self.net: NandNet | None = None

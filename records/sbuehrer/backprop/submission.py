@@ -191,9 +191,10 @@ class BackpropLut(Submission):
             sched.step()
 
             with torch.no_grad():
+                ch = self._chunk()
                 acc = sum(
-                    (m(vx[i : i + 2048]).argmax(1) == vy[i : i + 2048]).sum().item()
-                    for i in range(0, vx.shape[0], 2048)
+                    (m(vx[i : i + ch]).argmax(1) == vy[i : i + ch]).sum().item()
+                    for i in range(0, vx.shape[0], ch)
                 ) / vx.shape[0] * 100
             if acc > best_val:  # the forward pass is already hard, so this is the circuit's acc
                 best_val, best_ep = acc, ep
@@ -207,12 +208,24 @@ class BackpropLut(Submission):
 
         m.load_state_dict(best_state)
 
+    def _chunk(self) -> int:
+        """Rows per eval forward pass.
+
+        A layer's candidate gather is (rows, 2, width, cands) floats -- with cands=8 and a 48k-wide
+        layer, a FIXED chunk of 2048 asks for 6 GB in one allocation and OOMs an 11 GB card. So the
+        chunk is derived from the widest layer instead of hardcoded, capping that tensor at ~1 GB.
+        """
+        c = self.cfg
+        widest = max(c["widths"])
+        return max(64, min(2048, 2**28 // (2 * widest * c["cands"])))
+
     @torch.no_grad()
     def predict(self, pix: np.ndarray) -> np.ndarray:
         m = self.model
         dev = next(m.parameters()).device
         x = _t(pix, dev)
-        out = [m(x[i : i + 2048]).argmax(1).cpu() for i in range(0, len(x), 2048)]
+        ch = self._chunk()
+        out = [m(x[i : i + ch]).argmax(1).cpu() for i in range(0, len(x), ch)]
         return torch.cat(out).numpy()  # ties -> lowest class, same as the emitted argmax
 
     def emit_verilog(self) -> str:

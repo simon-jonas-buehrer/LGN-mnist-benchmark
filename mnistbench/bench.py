@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import time
 from pathlib import Path
 from types import ModuleType
@@ -119,23 +120,45 @@ def run_point(mod: ModuleType, point: dict, data: Mnist, *, device: str, seed: i
             "device": device, "seed": seed}
 
 
+def merge_record(record: Path) -> None:
+    """Assemble results.json from the per-point files. Safe to run any time; needed after a
+    parallel run, where each point was measured by its own process."""
+    mod = load_record(record)
+    done = {}
+    for f in (record / "artifacts").glob("*.point.json"):
+        p = json.loads(f.read_text())
+        done[p["name"]] = p
+    if not done:
+        raise SystemExit(f"no measured points under {record}/artifacts")
+    results = {
+        "record": f"{record.parent.name}/{record.name}",
+        "title": getattr(mod, "TITLE", record.name),
+        "points": [done[p["name"]] for p in mod.POINTS if p["name"] in done],
+    }
+    path = record / "results.json"
+    tmp = path.with_suffix(f".json.{os.getpid()}")  # atomic: a concurrent reader never sees a
+    tmp.write_text(json.dumps(results, indent=2) + "\n")  # half-written file
+    tmp.replace(path)
+    print(f"[merge] {path}: {len(results['points'])} points "
+          f"({', '.join(p['name'] for p in results['points'])})", flush=True)
+
+
 def run_record(record: Path, data: Mnist, *, device: str, seed: int, only: list[str] | None,
                force: bool) -> None:
     mod = load_record(record)
-    path = record / "results.json"
-    results = json.loads(path.read_text()) if path.exists() else {}
-    results["record"] = f"{record.parent.name}/{record.name}"
-    results["title"] = getattr(mod, "TITLE", record.name)
-    done = {p["name"]: p for p in results.get("points", [])}
+    artifacts = record / "artifacts"
 
     for point in mod.POINTS:
         if only and point["name"] not in only:
             continue
-        if point["name"] in done and not force:
+        # one file per point: a point is written only by the process that measured it, so points
+        # can be measured in parallel (one slurm job each) without racing on a shared results.json
+        pf = artifacts / f"{point['name']}.point.json"
+        if pf.exists() and not force:
             print(f"=== {point['name']}: already measured, skipping (--force to redo)", flush=True)
             continue
-        done[point["name"]] = run_point(mod, point, data, device=device, seed=seed,
-                                        artifacts=record / "artifacts")
-        results["points"] = [done[p["name"]] for p in mod.POINTS if p["name"] in done]
-        path.write_text(json.dumps(results, indent=2) + "\n")
-        print(f"[write] {path}", flush=True)
+        res = run_point(mod, point, data, device=device, seed=seed, artifacts=artifacts)
+        pf.write_text(json.dumps(res, indent=2) + "\n")
+        print(f"[write] {pf}", flush=True)
+
+    merge_record(record)
