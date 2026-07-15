@@ -19,27 +19,34 @@ lets a LUT net, a quantized MLP and a boosted tree land on the same axis honestl
 
 ![Pareto curve](results/pareto.png)
 
-The two reference records already make the point. Below ~15k gate equivalents the **genetic**
-search owns the frontier — its NAND-only circuits map to cheaper cells, and learned wiring wastes
-fewer gates than backprop's frozen random wiring. Above it, **backprop** pulls away and keeps
-climbing to 93%, while the hill-climber flatlines at ~81% no matter how many gates you hand it.
+The two reference records already make the point, and they cross. Below a few thousand gate
+equivalents the **genetic** search owns the frontier — its NAND-only circuits map to cheaper
+cells, and at that size wiring is most of what matters, which is all it learns. Above ~7k GE
+**backprop** takes over and keeps climbing to **96.9%**, while the hill-climber tops out near 87%.
 Neither record could have shown that by reporting its own parameter count; it only appears once
 both are charged for the same silicon.
+
+Every point here is trained to convergence — each one early-stops when its own validation accuracy
+stops improving, not at a fixed budget. That is load-bearing: an earlier version of this benchmark
+capped the genetic search at 40k generations and concluded it "plateaus at 81%". It does not. Given
+room to converge (the `m` point needs ~800k generations, seven GPU-hours) it reaches 86.5%. A
+stopping rule chosen for convenience had been masquerading as a property of the algorithm — exactly
+the kind of error a shared, re-runnable cost axis is supposed to catch.
 
 ## Leaderboard
 
 <!-- LEADERBOARD -->
 | | record | point | gate equivalents | area (um^2) | depth | MNIST test acc |
 |---|---|---|---|---|---|---|
-| * | `sbuehrer/backprop` | xl | 147,291 | 552,870 | 280 | **93.02%** |
-| * | `sbuehrer/backprop` | l | 47,341 | 177,700 | 234 | **89.60%** |
-| * | `sbuehrer/backprop` | m | 29,737 | 111,622 | 235 | **85.23%** |
-| * | `sbuehrer/genetic` | m | 9,505 | 35,678 | 192 | **81.36%** |
-|  | `sbuehrer/genetic` | l | 19,952 | 74,891 | 207 | **81.05%** |
-| * | `sbuehrer/genetic` | s | 4,061 | 15,242 | 153 | **80.35%** |
-|  | `sbuehrer/backprop` | s | 6,893 | 25,875 | 186 | **74.15%** |
-| * | `sbuehrer/genetic` | xs | 1,935 | 7,262 | 128 | **60.69%** |
-| * | `sbuehrer/backprop` | xs | 1,702 | 6,387 | 134 | **58.39%** |
+| * | `sbuehrer/backprop` | xl | 156,861 | 588,792 | 285 | **96.93%** |
+| * | `sbuehrer/backprop` | l | 52,973 | 198,838 | 238 | **95.35%** |
+| * | `sbuehrer/backprop` | m | 32,425 | 121,712 | 237 | **93.41%** |
+| * | `sbuehrer/backprop` | s | 7,514 | 28,205 | 188 | **87.89%** |
+|  | `sbuehrer/genetic` | l | 20,114 | 75,501 | 206 | **87.28%** |
+|  | `sbuehrer/genetic` | m | 9,146 | 34,330 | 191 | **86.52%** |
+| * | `sbuehrer/genetic` | s | 3,920 | 14,715 | 156 | **83.16%** |
+| * | `sbuehrer/genetic` | xs | 1,945 | 7,301 | 129 | **80.38%** |
+| * | `sbuehrer/backprop` | xs | 1,913 | 7,179 | 130 | **73.10%** |
 
 `*` = on the Pareto frontier (nothing is both smaller and more accurate).
 <!-- /LEADERBOARD -->
