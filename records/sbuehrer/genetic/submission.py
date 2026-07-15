@@ -65,14 +65,16 @@ TITLE = "genetic (learned wiring, all gates NAND)"
 
 NAND_TT = 0b0111  # bit (2a+b) of ~(a & b): f(0,0)=f(0,1)=f(1,0)=1, f(1,1)=0
 
-# `gens` is a CEILING, not a target. Training stops when validation has not improved for
-# `patience` evaluations, so each point runs to its own convergence. The old caps (20k-40k) were
-# the single biggest lie in this record: every point was still climbing when it hit them.
+# `gens` is a ceiling, not a target: training stops when validation has not improved for `patience`
+# evaluations, so each point runs to its own convergence. Five points; the hill-climber weakens as
+# the net grows (a random rewiring helps less and less), so the top of this curve shows where a
+# gradient-free search runs out of steam.
 POINTS = [
-    {"name": "xs", "bits": 1, "widths": (256, 256, 160), "gens": 1000000},
-    {"name": "s", "bits": 1, "widths": (1024, 1024, 320), "gens": 1000000},
-    {"name": "m", "bits": 3, "widths": (2048, 2048, 2048, 640), "gens": 1000000},
-    {"name": "l", "bits": 3, "widths": (4096, 4096, 4096, 4096, 1280), "gens": 1000000},
+    {"name": "xs", "bits": 1, "widths": (256, 256, 160), "gens": 2000000},
+    {"name": "s", "bits": 1, "widths": (1024, 1024, 320), "gens": 2000000},
+    {"name": "m", "bits": 3, "widths": (2048, 2048, 2048, 640), "gens": 2000000},
+    {"name": "l", "bits": 3, "widths": (4096, 4096, 4096, 4096, 1280), "gens": 2000000},
+    {"name": "xl", "bits": 3, "widths": (8000, 8000, 8000, 2400), "gens": 2000000},
 ]
 
 

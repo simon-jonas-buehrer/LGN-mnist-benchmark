@@ -36,10 +36,10 @@ def _cross_entropy(logits: np.ndarray, y: np.ndarray) -> float:
 
 
 def _fit_temperature(scores: np.ndarray, y: np.ndarray) -> float:
-    """Scalar T > 0 minimising CE(scores / T, y). Coarse-to-fine over log T; CE is unimodal in T,
-    and any T > 0 preserves the argmax, so calibration never changes the predicted class."""
+    """Scalar T > 0 minimising CE(scores / T, y). Any T > 0 keeps the argmax, so calibrating the
+    votes never changes the predicted class, only its confidence."""
     lo, hi = 1e-3, 1e2
-    for _ in range(6):  # ~40x zoom per pass, converges to a tight bracket
+    for _ in range(6):
         grid = np.geomspace(lo, hi, 40)
         ces = [_cross_entropy(scores / t, y) for t in grid]
         j = int(np.argmin(ces))

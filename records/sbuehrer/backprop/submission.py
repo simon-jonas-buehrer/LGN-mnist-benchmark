@@ -55,9 +55,8 @@ from mnistbench.spec import Submission
 
 TITLE = "backprop (learned truth tables + learned wiring)"
 
-# `epochs` is a ceiling, not a target: training early-stops when validation has not improved for
-# `patience` epochs, so every point below is trained to ITS OWN convergence. Raising the ceiling
-# does not change a converged point -- it only lets a slower one finish climbing.
+# Five points spanning a couple of decades of gate equivalents. `epochs` is a ceiling: training
+# early-stops when validation stops improving, so each point trains to its own convergence.
 POINTS = [
     {"name": "xs", "bits": 1, "widths": (320, 160), "epochs": 200},
     {"name": "s", "bits": 1, "widths": (1280, 640), "epochs": 200},

@@ -79,19 +79,34 @@ def _save(fig, out: Path) -> None:
     print(f"wrote {out}")
 
 
-def plot_accuracy(points: list[dict], out: Path) -> None:
+def _powerlaw(ge: np.ndarray, y: np.ndarray) -> "tuple[float, float]":
+    """Fit y = A * GE^b in log-log; return (A, b). y must be positive (an error/loss, not accuracy)."""
+    b, a = np.polyfit(np.log(ge), np.log(y), 1)
+    return float(np.exp(a)), float(b)
+
+
+def plot_accuracy(points: list[dict], out: Path, extrapolate_to: float = 1e9) -> None:
+    """Accuracy vs gate equivalents. Accuracy itself saturates, so the trendline is fit on the
+    ERROR (100 - acc), which is a power law, and mapped back -- the same fit as the loss plot,
+    shown in accuracy units. Measured solid, extrapolation dashed past the largest real circuit."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     records = sorted({p["record"] for p in points})
-    fig, ax = _new_ax(plt, "MNIST accuracy at a fixed silicon budget", "MNIST test accuracy  (%)")
+    fig, ax = _new_ax(plt, "MNIST accuracy vs circuit size", "MNIST test accuracy  (%)")
     for i, rec in enumerate(records):
         ps = sorted([p for p in points if p["record"] == rec], key=lambda p: p["ge"])
         c = SERIES[i % len(SERIES)]
-        ax.plot([p["ge"] for p in ps], [p["test_acc"] for p in ps],
-                color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
+        ge = np.array([p["ge"] for p in ps], float)
+        acc = np.array([p["test_acc"] for p in ps], float)
+        ax.plot(ge, acc, color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
+        err = np.clip(100.0 - acc, 1e-3, None)  # power law lives in error space, not accuracy
+        if len(ps) >= 2:
+            A, b = _powerlaw(ge, err)
+            xs = np.geomspace(ge[-1], extrapolate_to, 50)
+            ax.plot(xs, 100.0 - A * xs**b, color=c, lw=1.6, ls=(0, (5, 3)), alpha=0.7, zorder=2)
     ax.legend(frameon=False, loc="lower right", fontsize=9, labelcolor=INK2)
     _save(fig, out)
 
@@ -117,28 +132,18 @@ def plot_loss(points: list[dict], out: Path, extrapolate_to: float = 1e9) -> Non
     ax.yaxis.set_minor_locator(ticker.NullLocator())
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:g}"))
 
-    max_measured = max(p["ge"] for p in pts)
     for i, rec in enumerate(records):
         ps = sorted([p for p in pts if p["record"] == rec], key=lambda p: p["ge"])
         c = SERIES[i % len(SERIES)]
         ge = np.array([p["ge"] for p in ps], float)
         ce = np.array([p["test_ce"] for p in ps], float)
         ax.plot(ge, ce, color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
-        # power law CE = A * GE^b  <=>  line in log-log; extend it past the last real point
+        # power law CE = A * GE^b is a line in log-log; the dashed part extends it past the last
+        # measured point, so solid = measured and dashed = extrapolated.
         if len(ps) >= 2:
-            b, a = np.polyfit(np.log(ge), np.log(ce), 1)
+            A, b = _powerlaw(ge, ce)
             xs = np.geomspace(ge[-1], extrapolate_to, 50)
-            ax.plot(xs, np.exp(a) * xs**b, color=c, lw=1.6, ls=(0, (5, 3)), alpha=0.7, zorder=2)
-
-    # a shaded curtain + boundary that says, unmistakably, where measurement stops and fit begins
-    xhi = ax.get_xlim()[1]
-    ax.axvspan(max_measured, xhi, color=MUTED, alpha=0.12, zorder=0)
-    ax.axvline(max_measured, color=INK2, lw=1, ls=":", alpha=0.7, zorder=1)
-    ymax = ax.get_ylim()[1]
-    ax.text(max_measured * 1.3, ymax, "  extrapolated (power-law fit,\n  not synthesised)",
-            color=INK2, fontsize=8.5, va="top", ha="left")
-    ax.text(max_measured / 1.3, ymax, "measured  ", color=INK2, fontsize=8.5,
-            va="top", ha="right")
+            ax.plot(xs, A * xs**b, color=c, lw=1.6, ls=(0, (5, 3)), alpha=0.7, zorder=2)
     ax.legend(frameon=False, loc="lower left", fontsize=9, labelcolor=INK2)
     _save(fig, out)
 
