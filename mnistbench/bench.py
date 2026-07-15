@@ -8,7 +8,7 @@ Per point:
           -> cross-check the netlist against the submission's own predict()
 
 The cross-check is a hard failure, not a warning: if a submission's model and its circuit
-disagree, one of the two numbers on the leaderboard is a lie and we do not know which.
+disagree, one of its two leaderboard numbers is wrong.
 """
 
 from __future__ import annotations
@@ -138,17 +138,13 @@ def run_point(mod: ModuleType, point: dict, data: Mnist, *, device: str, seed: i
     out = {**point, **m, "val_acc": round(val_acc, 2), "train_s": round(train_s),
            "device": device, "seed": seed}
 
-    # cross-entropy over the readout's per-class firing fractions (see Submission.scores). Faithful
-    # to the circuit: the fractions are the popcount groups the netlist computes, and their argmax
-    # is the class the netlist emits -- the equivalence check above already pins that down.
+    # cross-entropy over the readout's per-class firing fractions (see Submission.scores). The raw
+    # fractions sit in a narrow band, so a plain softmax is near-uniform and CE would read ~ln(10)
+    # at any accuracy. Fit one temperature T on val and report test CE at that T; T > 0 keeps the
+    # argmax, so the calibrated class is still the circuit's.
     sc_va = model.scores(data.val_x)
     sc_te = model.scores(data.test_x)
     if sc_te is not None:
-        # The raw fractions live in a narrow band (a NAND net's gates mostly fire), so softmax over
-        # them is near-uniform and CE would read ~ln(10) no matter the accuracy. So temperature-
-        # scale: fit ONE scalar T on val to minimise CE, then report test CE at that T. T > 0 can't
-        # move an argmax, so the calibrated class is still exactly the circuit's -- this is the
-        # circuit's own votes, reported at their best-calibrated confidence, not an invented signal.
         t = _fit_temperature(np.asarray(sc_va, float), data.val_y)
         out["test_ce"] = round(_cross_entropy(np.asarray(sc_te, float) / t, data.test_y), 4)
         out["ce_temp"] = round(float(t), 4)

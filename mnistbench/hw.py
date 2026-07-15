@@ -5,10 +5,9 @@ Every submission is judged as a circuit, and the circuit has a fixed interface:
     module top (input [6271:0] pix, output [3:0] cls);
 
 `pix[8*p +: 8]` is the uint8 value of pixel p (row-major, 0..783), and `cls` is the predicted
-digit, 0..9. EVERYTHING between those two ports is yours and is counted: the binarizer, the
-learned logic, the readout head, the argmax. There is no free preprocessing and no free
-softmax, which is the whole point -- it is the only way two different architectures can be
-compared on one axis.
+digit, 0..9. Everything between those two ports is yours and is counted: the binarizer, the
+learned logic, the readout head, the argmax. No free preprocessing and no free softmax, so two
+different architectures compare on one axis.
 
 The pieces below are the reusable ones. Most logic networks are "a fan-in-2 gate net with a
 popcount head", so `emit_lutnet()` covers them end to end:

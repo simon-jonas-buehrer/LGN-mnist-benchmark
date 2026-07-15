@@ -1,45 +1,37 @@
-"""sbuehrer/backprop -- gradient descent learns BOTH what each gate is and how it is wired.
+"""sbuehrer/backprop: gradient descent learns both what each gate is and how it is wired.
 
-A LUT gate needs two answers: *what function am I* and *which two signals do I read*. This
-record learns both, and both as a discrete choice with a smooth gradient:
+A LUT gate needs two answers: what function it is, and which two signals it reads. Both are
+learned as a discrete choice with a smooth gradient:
 
-  WHAT (the truth table). Four latent reals per gate, one per truth-table entry, binarized by
-  a straight-through estimator on a sin:
+  Truth table. Four latent reals per gate, one per truth-table entry, binarized by a
+  straight-through estimator on a sin:
 
-      hard = 1[sin(z) > 0]                 exact 0/1 -- what the forward pass uses
+      hard = 1[sin(z) > 0]                 exact 0/1, what the forward pass uses
       soft = 0.5 + 0.5*sin(z)              smooth, differentiable
       bit  = hard + (soft - soft.detach()) forward = hard, backward = d(soft)
 
   sin rather than sigmoid because sin is periodic: a latent never saturates, so there is always
   a gradient toward the nearest 0/1 basin.
 
-  WHERE (the wiring). Each of a gate's two inputs gets 8 candidate source signals, drawn at
-  random once, plus a learnable logit per candidate. The forward pass takes the argmax -- ONE
-  wire, an exact bit -- and the backward pass sees the softmax over all 8, so a candidate that
-  would have helped still gets gradient and the choice can move. See LutLayer.
+  Wiring. Each of a gate's two inputs gets 8 candidate source signals, drawn at random once, plus
+  a learnable logit per candidate. The forward pass takes the argmax (one wire, an exact bit); the
+  backward pass sees the softmax over all 8, so a candidate that would have helped still gets
+  gradient and the choice can move. See LutLayer.
 
-The forward pass is therefore ALREADY an exact boolean circuit: no "train soft, discretize at
-the end and pray" step, and the val accuracy the trainer prints is the accuracy the silicon has.
-That is not a nicety -- the harness rejects any point whose python model and circuit disagree, so
-a softmax MIXTURE of candidate bits (a fraction, with no hardware) would be caught immediately.
+So the forward pass is already an exact boolean circuit, and the val accuracy the trainer prints
+is the accuracy of the silicon. The harness rejects any point whose model and circuit disagree, so
+a softmax mixture of candidate bits (a fraction, with no hardware) would be caught immediately.
 
-sbuehrer/genetic is the mirror image: it learns only the wiring, by mutation, with no gradients.
+The encoder is a thermometer at thresholds 2^k-1, so `pix > 127` is bit 7, a wire that costs no
+gates.
 
-The encoder is a thermometer at thresholds 2^k-1, which is not an accident: `pix > 127` is just
-"bit 7", i.e. a WIRE, and costs zero gates. Choosing thresholds that are cheap in silicon is
-exactly the kind of pressure this benchmark is supposed to create.
-
-SETTINGS. lr=0.2, batch=128, from a 22-config sweep on the `m` point (val, never test):
+lr=0.2, batch=128, from a 22-config sweep on the `m` point (val, never test):
 
     lr        0.01   0.02   0.05   0.1    0.2    0.3    0.5    0.8
     best val  92.15  92.47  92.47  92.78  92.80  92.45  91.55  91.03
 
-Two things worth taking from that table. The peak is FLAT -- everything from 0.02 to 0.2 lands
-within 0.3 points -- so this record is not perched on a lucky hyperparameter, and a submitter who
-reruns it with lr=0.05 will see the same curve. And the whole sweep is worth about one point,
-while turning the wiring from frozen to learned was worth about seven. The lever here is capacity,
-not tuning: at `m` these nets converge to ~92.8% for ANY sane lr, because that is what a
-5120->2560 net can do, and the only way past it is more gates.
+The peak is flat: 0.02 to 0.2 all land within 0.3 points, so the result does not depend on a lucky
+setting. At `m` the net converges to ~92.8% for any sane lr; past that needs more gates.
 """
 
 from __future__ import annotations

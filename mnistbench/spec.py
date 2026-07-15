@@ -41,18 +41,17 @@ class Submission(ABC):
         """(N, 784) uint8 -> (N,) predicted classes.
 
         Must be the EXACT function emit_verilog() describes. The harness checks this on 512
-        test images and rejects the point if they differ on even one of them -- not to police
-        you, but because the check catches the bug that otherwise silently costs you accuracy.
+        test images and rejects the point if they differ on even one of them. The check catches
+        the bug that would otherwise silently cost you accuracy.
         """
 
     def scores(self, pix: np.ndarray) -> np.ndarray | None:
-        """(N, 784) uint8 -> (N, 10) per-class scores in [0, 1], or None if you don't provide them.
+        """(N, 784) uint8 -> (N, 10) per-class scores in [0, 1], or None to skip the loss axis.
 
-        A gate circuit outputs a hard class, so there is no probability to take a cross-entropy of
-        -- except that the readout, just before the argmax, holds one integer per class: how many
-        of that class's gates fired. Divided by the group size that is a firing FRACTION in [0, 1],
-        and its argmax is exactly `predict()` (the groups are equal size), so it is the circuit's
-        own signal, not an invented one. The harness softmaxes these into the cross-entropy on the
-        y-axis. Return None to sit out that axis (you still get accuracy).
+        The circuit outputs a hard class, but the readout just before the argmax holds one integer
+        per class: how many of that class's gates fired. Divided by the group size, that is a
+        firing fraction in [0, 1] whose argmax equals predict() (the groups are equal size). The
+        harness temperature-scales and softmaxes these into the cross-entropy loss. Return None to
+        report accuracy only.
         """
         return None

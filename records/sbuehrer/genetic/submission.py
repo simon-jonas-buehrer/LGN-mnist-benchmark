@@ -1,49 +1,29 @@
-"""sbuehrer/genetic -- learn the WIRING of a fixed NAND net by mutation hill-climbing.
+"""sbuehrer/genetic: learn the wiring of a fixed NAND net by mutation hill-climbing.
 
-The mirror image of sbuehrer/backprop. There, every gate could become any of the 16 boolean
-functions but the wires were frozen; here every gate is a NAND, forever, and the only free
-parameters are which two signals each gate reads. NAND alone is functionally complete, so this
-search space contains every circuit the LUT net can express -- the question is whether a
-gradient-free search can find anything in it.
-
-The algorithm is deliberately the simplest thing that deserves the name:
+Every gate is a NAND. NAND is functionally complete, so this search space contains every circuit
+the LUT net can express; the only free parameters are which two signals each gate reads. No
+gradients.
 
     for each generation:
         make k-1 mutants of the current wiring (rewire `mut` gate endpoints at random)
-        score all k (the incumbent is always one of them) on the SAME minibatch
+        score all k (the incumbent included) on the same minibatch
         keep the best
 
-Three details that are not cosmetic:
+Three details that matter:
 
-  * FITNESS IS A MARGIN, NOT ACCURACY. Accuracy on a minibatch changes only when a prediction
-    flips, so almost every single-wire mutation scores identically and the search random-walks.
-    The margin (votes for the true class minus the best wrong class) moves whenever any vote
-    moves, which turns a flat plateau into a slope.
-  * THE SELECTION BATCH MUST BE BIG. One rewired wire moves the margin by a hair, so a small
-    batch drowns that signal in sampling noise and selection picks the luckier mutant instead
-    of the better one. Measured on the `xs` point, 20k generations, everything else equal:
-    batch 1024 -> 22.6%, batch 4096 -> 24.9%, **batch 8192 -> 60.4%**. This one number is worth
-    more than any amount of cleverness elsewhere in the search. It does saturate, though -- on
-    `m`: 8192 -> 78.7%, 16384 -> 79.6%, 32768 -> 79.6%. 16384 is the knee, and past it you are
-    paying 2x the time per generation for nothing.
-  * DELTA FORWARD. A mutant differs from the incumbent only from its lowest mutated layer
-    upward, so everything below that is reused. Cheap, exact, and it is most of the speed.
-  * GENERATIONS ARE THE SCARCE RESOURCE, so spend them on generations. `k` (mutants per
-    generation) trades throughput for a better pick each step, and there is an interior optimum:
-    on `m`, k=4 -> 82.3% (59 gen/s), **k=8 -> 83.3% (32 gen/s)**, k=16 -> 81.4% (10 gen/s, and
-    still climbing when it ran out of time -- it is not worse, it is just slower per step, which
-    is the same thing when the budget is wall-clock). Likewise mut=1 beats mut=2 and mut=4.
+  * Fitness is a margin, not accuracy. Minibatch accuracy changes only when a prediction flips, so
+    almost every single-wire mutation scores the same and the search random-walks. The margin
+    (votes for the true class minus the best wrong class) moves whenever any vote moves, turning
+    the plateau into a slope.
+  * The selection batch must be big. One rewired wire moves the margin by a hair; a small batch
+    buries it in sampling noise, so selection keeps the luckier mutant, not the better one. On
+    `xs`, 20k generations, all else equal: batch 1024 -> 22.6%, 4096 -> 24.9%, 8192 -> 60.4%. It
+    saturates on `m` around batch 16384.
+  * Delta forward. A mutant differs from the incumbent only from its lowest mutated layer upward,
+    so every layer below is reused. Exact, and most of the speed.
 
-WHAT THE CAP WAS HIDING. This record used to stop at 20k-40k generations and report ~81%, and
-the curve was read as "the hill-climber plateaus at 81% no matter how many gates you give it".
-That was false, and it was an artifact of the cap: every point was still finding new bests when
-the generation budget ran out. Given room to converge, `m` reaches 83.3%. The lesson is not that
-the GA is secretly good -- it still loses badly to backprop per gate -- but that a stopping rule
-you chose for convenience will happily masquerade as a property of the algorithm. Every point
-here now runs until it stops improving (patience), never to a fixed generation count.
-
-No gradients are involved anywhere. This is here to be beaten -- and to make visible what the
-gate count of a hill-climbed circuit looks like next to a differentiated one.
+`k=8`, `mut=1`, `batch=16384`, from a sweep. Each point trains until validation stops improving,
+so `gens` is a ceiling, not a target.
 """
 
 from __future__ import annotations

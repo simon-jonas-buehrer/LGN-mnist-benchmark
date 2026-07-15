@@ -1,15 +1,14 @@
 """MNIST, exactly as every submission sees it: plain numpy uint8.
 
-Images stay uint8 (0..255) and flat, (N, 784), because that is what the circuit gets -- the top
-module's input is the raw pixel bytes. Any float, threshold or normalization you want is part
-of YOUR model, and lands in YOUR gate count.
+Images stay uint8 (0..255) and flat, (N, 784), because that is what the circuit gets: the top
+module's input is the raw pixel bytes. Any float, threshold or normalization is part of your
+model, and lands in your gate count.
 
 numpy, not torch, so a submission can be written in torch, JAX, TensorFlow or nothing at all.
 
 The split is fixed for everyone: the official 60k training images are cut 54k/6k into
 train/val with a fixed permutation, and the official 10k test images are the test set. Train on
-train, tune on val. You never need test -- the harness computes the leaderboard number itself,
-by simulating your synthesized netlist.
+train, tune on val. The harness computes the test number itself, by simulating the netlist.
 """
 
 from __future__ import annotations

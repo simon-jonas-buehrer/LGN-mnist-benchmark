@@ -10,16 +10,16 @@ Two yosys+ABC runs over the same Verilog, with the same logic-optimization scrip
 
   2. `abc -g NAND` -> a NAND-only netlist as yosys JSON. Same boolean function, but a form we
      can simulate exactly (see netlist.py), which is where the y-axis (accuracy) comes from.
-     Nobody is trusted to report their own accuracy; we run their circuit.
+     Accuracy comes from running the circuit, not from self-reporting.
 
-Both runs start from the entrant's Verilog, so the optimizer is free to fold away anything the
-submission wasted -- dead gates, constant-driven logic, a pixel nobody reads. You are charged
-for the circuit you actually need, not for the one you wrote.
+Both runs start from the entrant's Verilog, so the optimizer folds away anything the submission
+wasted: dead gates, constant-driven logic, a pixel nobody reads. You are charged for the circuit
+you need, not the one you wrote.
 
-ABC gotcha, learned the hard way in a previous life of this repo: `resyn2` and friends are
-ALIASES from abc.rc, which yosys does not load. Passing one makes ABC abort -- and yosys still
-prints a stat block for the wreckage, so an empty design reads as a spectacular "compression".
-The scripts below are expanded to primitives and _check() hard-fails on ABC errors.
+ABC gotcha: `resyn2` and friends are aliases from abc.rc, which yosys does not load. Passing one
+makes ABC abort, and yosys still prints a stat block, so an empty design can read as a large
+"compression". The scripts below are expanded to primitives, and _check() hard-fails on ABC
+errors.
 """
 
 from __future__ import annotations

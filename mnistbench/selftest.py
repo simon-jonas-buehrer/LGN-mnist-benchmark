@@ -1,9 +1,9 @@
-"""End-to-end self-test of the harness on a tiny RANDOM (untrained) net.
+"""End-to-end self-test of the harness on a tiny random (untrained) net.
 
     python -m mnistbench.selftest
 
-It proves the one thing the benchmark rests on: the Verilog we emit, the netlist yosys and ABC
-give back, and a plain python forward pass are the SAME boolean function. If this passes, a gap
+It checks the property the benchmark rests on: the Verilog we emit, the netlist yosys and ABC
+give back, and a plain python forward pass are the same boolean function. If this passes, a gap
 between two records is a gap between two optimizers, not between two emission bugs.
 
 The accuracy here is irrelevant (a random net scores ~10%). What is checked is bit-exact

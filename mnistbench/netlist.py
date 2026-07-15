@@ -1,10 +1,9 @@
 """Read the synthesized NAND netlist back in and run it on the test set. Pure numpy.
 
-This is the y-axis, and the reason the benchmark is trustworthy: a submission does not report
-its accuracy, it reports a circuit, and we measure the accuracy of *that circuit*. A
-straight-through estimator that doesn't quite agree with its hard forward pass, a soft surrogate
-quietly used at eval, a float sneaking out of the head -- none of it survives here, because none
-of it exists in the netlist.
+This is the y-axis: a submission reports a circuit, not an accuracy, and the accuracy is measured
+on that circuit. A straight-through estimator that disagrees with its hard forward pass, a soft
+surrogate used at eval, or a float leaking from the head does not survive here, because none of
+it exists in the netlist.
 
 The netlist is yosys JSON with only $_NAND_ and $_NOT_ cells (NOT(a) = NAND(a,a), so one kernel
 covers both). Gates are grouped into levels by longest path, and 64 images are packed into each

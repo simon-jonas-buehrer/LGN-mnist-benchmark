@@ -1,19 +1,20 @@
 # The rules
 
-## The one sentence
+You submit a training procedure and a circuit. The harness measures the circuit.
 
-**Give us a training procedure and a circuit. We measure the circuit.**
-
-## The two axes
+## The axes
 
 | axis | what it is | where it comes from |
 |---|---|---|
-| **x** | circuit size, in **gate equivalents (GE)** | `yosys` + `ABC` map your Verilog to the sky130 standard-cell library; GE = total cell area / area of a sky130 NAND2 (3.7536 um^2) |
-| **y** | **MNIST test accuracy** | the same Verilog is mapped a second time to a NAND-only netlist, and *that netlist* is evaluated gate by gate on all 10,000 test images |
+| x | circuit size, in gate equivalents (GE) | `yosys` + `ABC` map your Verilog to the sky130 standard-cell library; GE = total cell area / area of a sky130 NAND2 (3.7536 um^2) |
+| y | MNIST test accuracy | the same Verilog is mapped a second time to a NAND-only netlist, and that netlist is evaluated gate by gate on all 10,000 test images |
 
-Nothing you report about your own model is used. `predict()` exists only so the harness can
-check that your python model and your Verilog are the same function; if they disagree on even
-one of 512 sampled images, the point is rejected.
+There is also a loss curve: if `scores()` returns the readout's per-class vote fractions, the
+harness reports a temperature-calibrated cross-entropy. It is optional; accuracy is not.
+
+Nothing you report about your own model is used. `predict()` exists only so the harness can check
+that your python model and your Verilog are the same function; if they disagree on even one of 512
+sampled images, the point is rejected.
 
 ### Why gate equivalents, and not "number of gates"
 
@@ -38,25 +39,22 @@ module top (input [6271:0] pix, output [3:0] cls);
 * `cls` is the predicted digit, `0..9`.
 * Purely combinational. No clock, no state, no memory.
 
-**Everything between those ports is yours, and everything between those ports is counted.**
-Your binarizer or thermometer encoder is counted. Your learned logic is counted. Your readout
-head and your argmax are counted. There is no free preprocessing and no free softmax.
+Everything between those ports is yours and is counted: the binarizer or thermometer encoder, the
+learned logic, the readout head, the argmax. No free preprocessing and no free softmax. That is
+what lets a 3-layer LUT net, a boosted tree ensemble and a 2-bit quantized MLP land on one axis:
+whatever architecture you bring becomes gates, and the gates are counted the same way.
 
-That is the whole trick of this benchmark. It is what lets a 3-layer LUT net, a boosted tree
-ensemble and a 2-bit quantized MLP land on one axis and be compared honestly: whatever
-architecture you bring, it has to become gates, and the gates get counted the same way.
-
-A useful consequence: cheap design choices are *rewarded*, not just tolerated. `pix > 127` is
-bit 7 of the byte -- a wire, zero gates. `pix > 100` is a real comparator. If your encoder
-spends 8,000 GE before any learning happens, that 8,000 GE is on your x-axis.
+Cheap design choices are rewarded. `pix > 127` is bit 7 of the byte, a wire, zero gates. `pix >
+100` is a real comparator. If your encoder spends 8,000 GE before any learning happens, that
+8,000 GE is on your x-axis.
 
 ## What you may and may not do
 
 * Train on `data.train_x/train_y` (54,000 images). Tune on `data.val_x/val_y` (6,000).
 * **Never fit on the test set.** The harness holds it; you do not need it.
-* Any optimizer, any architecture, any random seed, any amount of compute. There is **no
-  compute budget** -- the axes are area and accuracy, and if your optimizer needs a week, take
-  a week. (`train_s` is recorded in `results.json`, as information, not as a constraint.)
+* Any optimizer, any architecture, any random seed, any amount of compute. There is no compute
+  budget; the axes are area and accuracy. (`train_s` is recorded in `results.json` as information,
+  not as a constraint.)
 * Data augmentation is allowed (it changes your optimizer's inputs, not the circuit's).
 * One record = one method = one curve. Sweep model sizes to get several points; that is your
   curve, and the union of everyone's curves is the frontier.

@@ -1,9 +1,9 @@
-"""Collect every record's results.json into the Pareto curve and the leaderboard table.
+"""Collect every record's results.json into the plots and the leaderboard table.
 
-A point A dominates B if it is at least as accurate AND at least as small, and strictly better
-in one of the two. The Pareto frontier is what nothing dominates: the answer to "for this much
-silicon, what is the best accuracy anyone has achieved". That is the leaderboard -- there is no
-single winner, because "best" is a curve, not a number.
+A point A dominates B if it is at least as accurate and at least as small, and strictly better in
+one of the two. The Pareto frontier is the set of points nothing dominates: for a given amount of
+silicon, the best accuracy achieved. The leaderboard is that frontier; there is no single winner
+because best is a curve, not a number.
 """
 
 from __future__ import annotations
