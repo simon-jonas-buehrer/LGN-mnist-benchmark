@@ -1,16 +1,22 @@
 [project]
-name = "lut-tutorial"
+name = "mnistbench"
 version = "0.1.0"
-description = "A small LUT (look-up table) network in pure PyTorch that trains on CIFAR-10."
+description = "Benchmark optimizers by the silicon their solutions cost: MNIST accuracy vs sky130 gate equivalents."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    # Plain wheels from PyPI: uv picks the right build for your platform -
-    # CPU on a Mac/laptop, CUDA on a Linux GPU box. Nothing cluster-specific.
-    "torch>=2.2",
-    "numpy>=1.24",
-    "matplotlib>=3.7",
-]
+
+# The harness needs numpy and nothing else. It never imports a deep-learning framework, so a
+# submission is free to use torch, JAX, TensorFlow or none of them -- everything crossing the
+# boundary (images in, predictions out) is a numpy array.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]        # only for `python -m mnistbench pareto`
+records = ["torch>=2.2"]          # only for the two reference records under records/sbuehrer/
+
+# Scoring also needs yosys + ABC and the sky130 liberty, which are not pip-installable:
+#   conda create -n eda -c conda-forge -c litex-hub yosys open_pdks.sky130a
+# See docs/RULES.md.
 
 [tool.uv]
 package = false
