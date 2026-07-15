@@ -164,7 +164,7 @@ def table(points: list[dict]) -> str:
         )
     lines.append("")
     lines.append("`*` = on the Pareto frontier (nothing is both smaller and more accurate). "
-                 "test CE = temperature-calibrated cross-entropy over the circuit's class votes.")
+                 "test CE = calibrated cross-entropy over the circuit's class votes.")
     return "\n".join(lines)
 
 

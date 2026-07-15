@@ -1,31 +1,31 @@
-# mnistbench: benchmark optimizers by the silicon their solutions cost
+# mnistbench
 
-Optimizers are usually compared on different architectures, so the comparison means little: one
-paper counts parameters, another counts gates before synthesis, another counts FLOPs. This repo
-fixes one task, one dataset, and one cost axis, and lets any optimizer compete on it.
+Compare optimizers by the chip area their solutions cost.
 
-**You submit a training procedure and a circuit. The harness measures the circuit.**
+Papers compare optimizers on different models, so the numbers never line up: one counts
+parameters, one counts gates, one counts FLOPs. This repo picks one task, one dataset, and one
+cost, and lets any optimizer compete.
+
+**You send a training procedure and a circuit. The harness measures the circuit.**
 
 |  | |
 |---|---|
 | task | MNIST, fixed 54k / 6k / 10k train / val / test split |
-| y-axis | test accuracy, from simulating your synthesized netlist gate by gate |
-| x-axis | circuit size in gate equivalents (GE): `yosys` + `ABC` map your Verilog to sky130 cells; GE = area / area of a NAND2 |
-| result | two curves against GE: accuracy, and cross-entropy loss |
+| x-axis | circuit size in gate equivalents (GE). `yosys` and `ABC` turn your Verilog into sky130 chip cells; GE = total area / the area of one NAND2 gate. |
+| y-axis | test accuracy, and a cross-entropy loss, both read off the built circuit |
 
-Everything the model does at inference is inside the circuit and is counted: the binarizer, the
-learned logic, the readout, the argmax. No free preprocessing, no free softmax. That lets a LUT
-net, a quantized MLP, and a boosted tree land on the same axis.
+Everything the model does at run time is in the circuit and is counted: the input encoding, the
+logic, the readout, the argmax. Nothing is free. That is what puts a logic net, a small MLP, and a
+boosted tree on the same axis.
 
-![accuracy vs gate equivalents](results/pareto_acc.png)
-![loss vs gate equivalents](results/pareto_loss.png)
+![accuracy vs circuit size](results/pareto_acc.png)
+![loss vs circuit size](results/pareto_loss.png)
 
-The two reference records cross: below a few thousand gate equivalents the genetic search is ahead,
-above it backprop pulls away. Solid lines with markers are measured points; the dashed line extends
-a power-law fit past the largest circuit actually synthesized.
+The two example records cross. Below a few thousand gates the genetic search wins; above that,
+backprop pulls ahead. Solid dots are measured. The dashed line is a power-law fit, drawn past the
+largest circuit we actually built.
 
-Every point is trained to convergence: it early-stops when its own validation accuracy stops
-improving, not at a fixed budget.
+Every point trains until it stops improving on the validation set, not to a fixed step count.
 
 ## Leaderboard
 
@@ -38,71 +38,72 @@ improving, not at a fixed budget.
 | * | `sbuehrer/genetic` | xs | 1,945 | 129 | **80.38%** | 0.627 |
 | * | `sbuehrer/backprop` | xs | 1,913 | 130 | **73.10%** | 0.782 |
 
-`*` = on the Pareto frontier (nothing is both smaller and more accurate). test CE = temperature-calibrated cross-entropy over the circuit's class votes.
+`*` = on the Pareto frontier (nothing is both smaller and more accurate). test CE = calibrated cross-entropy over the circuit's class votes.
 <!-- /LEADERBOARD -->
 
-## The contract
+## Add your optimizer
+
+Write `records/<you>/<method>/submission.py`:
+
+```python
+POINTS = [{"name": "s", ...}, {"name": "l", ...}]    # one dict per point on your curve
+
+class Mine(Submission):
+    def train(self, data, *, device, seed): ...      # data.train_x is (54000, 784) uint8 numpy
+    def emit_verilog(self) -> str: ...               # your trained model, as module top
+    def predict(self, pix): ...                      # numpy in, numpy out; must match the verilog
+
+def build(**point) -> Submission: return Mine(**point)
+```
+
+Then:
+
+```bash
+python -m mnistbench run records/<you>/<method>   # train, build the circuit, measure it
+python -m mnistbench pareto                        # redraw the plots and the table
+```
+
+The harness only uses numpy, so write the model in PyTorch, JAX, TensorFlow, or plain code. It
+only ever sees arrays and Verilog. If your model is a fan-in-2 logic net, `mnistbench/hw.py` writes
+the Verilog for you.
+
+Your circuit must match `predict()` on every test image, or the point is dropped. So the score on
+the board is the score of the hardware.
+
+The circuit has one fixed shape:
 
 ```verilog
 module top (input [6271:0] pix, output [3:0] cls);   // combinational; no clock, no memory
 ```
 
-`pix[8*p +: 8]` is pixel `p` as a raw uint8 (row-major, `p = 0..783`); `cls` is the predicted
-digit. Full rules in [docs/RULES.md](docs/RULES.md).
-
-## Submit
-
-```python
-# records/<you>/<method>/submission.py
-POINTS = [{"name": "s", ...}, {"name": "l", ...}]    # one dict per point on your curve
-
-class Mine(Submission):
-    def train(self, data, *, device, seed): ...      # data.train_x is (54000, 784) uint8 numpy
-    def emit_verilog(self) -> str: ...               # the trained model, as module top
-    def predict(self, pix): ...                      # numpy in, numpy out; must equal the verilog
-
-def build(**point) -> Submission: return Mine(**point)
-```
-
-```bash
-python -m mnistbench run records/<you>/<method>   # train, synthesize, simulate, write results.json
-python -m mnistbench pareto                        # redraw the curves and the table
-```
-
-The harness imports numpy and nothing else, so write your model in PyTorch, JAX, TensorFlow, or
-raw bit-twiddling; all it sees is arrays and Verilog. If your model is a fan-in-2 logic net,
-`mnistbench/hw.py` emits the Verilog for you.
-
-A point whose `predict()` disagrees with its own circuit on any image is rejected, so the accuracy
-on the board is the accuracy of the hardware.
+`pix[8*p +: 8]` is pixel `p` as a raw byte (row-major, `p = 0..783`); `cls` is the digit. Full
+rules in [docs/RULES.md](docs/RULES.md).
 
 ## What's here
 
 ```
-mnistbench/       the harness
-  data.py         MNIST as uint8 numpy, fixed split
-  spec.py         the Submission API, the whole contract
-  hw.py           verilog emitters: thermometer encoder, fan-in-2 LUT layers, popcount + argmax
-  synth.py        yosys + ABC to sky130 area (x-axis) and a NAND netlist
-  netlist.py      bit-packed simulator, 64 images per uint64 word (y-axis)
-  bench.py        train, emit, synth, simulate, write results.json
-  pareto.py       the curves and the leaderboard
-  selftest.py     checks emit == synthesize == simulate, bit for bit
-records/
-  sbuehrer/backprop/   gradients (straight-through sin on the truth tables, softmax on the wires)
-  sbuehrer/genetic/    no gradients (fixed NANDs, wiring by mutation hill-climbing)
-docs/RULES.md
+mnistbench/     the harness
+  data.py       MNIST as uint8 numpy, fixed split
+  spec.py       the submission API
+  hw.py         Verilog: thermometer encoder, fan-in-2 LUT layers, popcount + argmax
+  synth.py      yosys + ABC to chip area and a NAND netlist
+  netlist.py    bit-packed simulator, 64 images per word
+  bench.py      train, emit, synth, simulate
+  pareto.py     the plots and the leaderboard
+  selftest.py   checks emit == synth == simulate, bit for bit
+records/sbuehrer/
+  backprop/     learns each gate and its wiring by gradient descent
+  genetic/      fixes every gate to NAND, learns only the wiring by mutation
 ```
 
-The two records share an encoder, a head, and a gate budget, and differ in one thing: whether the
-optimizer has a gradient. Backprop learns what each gate computes and what it reads. The
-hill-climber learns wiring alone, by mutation. NAND is functionally complete, so the hill-climber
-searches a space that contains every circuit backprop can express; what separates them is the
-search, not the architecture.
+The two records are a matched pair: same encoder, same readout, same gate budget. The only
+difference is the optimizer, one with a gradient and one without. Every gate can be a NAND, and
+NANDs alone can build any circuit, so the genetic search could in principle find anything backprop
+finds. What sets them apart is the search, not the model.
 
 ## Running the scorer
 
-Scoring needs `yosys` (with ABC) and the sky130 liberty, which are not pip-installable:
+Scoring needs `yosys` (with ABC) and the sky130 library, which are not on pip:
 
 ```bash
 conda create -n eda -c conda-forge -c litex-hub yosys open_pdks.sky130a
