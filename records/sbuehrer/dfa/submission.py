@@ -5,10 +5,10 @@ network's structures are fixed and non-learnable:
 
   Forward. A butterfly (FFT) pattern wires every gate to exactly two signals of the layer below:
   gate j reads j and j ^ (1 << k), with the stride k halving every layer. It is deterministic and
-  never touched by the optimizer. The stride cycle is the whole point: it makes the receptive field
-  actually double per layer, so after log2(width) layers every gate sees every pixel. That fixes
-  the depth: log2(width) + 1 is the SHALLOWEST net that sees the whole image, and since DFA decays
-  with depth (measured below), shallowest-that-mixes is exactly what you want.
+  never touched by the optimizer. The stride cycle makes the receptive field genuinely double per
+  layer, so after log2(width) layers every gate sees every pixel -- but see DEPTH below: it turns
+  out you do not WANT that. The nets here are 5 layers deep and each gate sees ~64 of 784 pixels.
+  The cycle still matters, because a butterfly with a constant stride mixes nothing at all.
 
   Backward. A fixed random matrix B_l projects the output error DIRECTLY onto layer l. There is no
   backward sweep: no error signal ever crosses a layer boundary, and no chain rule is ever applied
@@ -38,22 +38,52 @@ equivalents; the structure that becomes silicon is the butterfly wiring.
 Latents are sin-binarized, hard = 1[sin(z) > 0], borrowed from the backprop record: sin is
 periodic, so a latent never saturates and there is always a slope toward the nearest 0/1 basin.
 Init is residual (every gate passes input A, tt 0b1100) so the net starts as an identity path and a
-deep gate's change actually reaches the readout -- without it DFA at depth 20 has nothing to align
-to. The init sits at +-pi/4 rather than +-pi/2: pi/2 is the exactly-right table but cos(pi/2) = 0,
-so the gradient would be identically zero and the net would never move at all.
+deep gate's change actually reaches the readout. The init sits at +-pi/4 rather than +-pi/2: pi/2
+is the exactly-right table but cos(pi/2) = 0, so the gradient would be identically zero and the net
+would never move at all.
 
 The forward pass is exact boolean, so the val accuracy printed during training IS the circuit's
 accuracy, and the harness's 512-image model-vs-netlist check is a formality rather than a hazard.
 
-Depth is the interesting axis, and the two forces pull against each other: the butterfly needs
-log2(width) layers to mix the whole image, while DFA decays with depth. Sweep at width=1024,
-bits=1, readout=320, 60 epochs (val, never test):
+Every hyperparameter below is the winner of a sweep, and two of them overturned the design this
+record started with. All numbers are val, never test.
 
-    (filled in from the depth sweep)
+DEPTH. The plan was depth = log2(width)+1, so that the butterfly mixes every pixel into every
+readout gate. That is exactly wrong. A width x depth grid at bits=1, readout=320 says depth is a
+cost with no benefit, and that full mixing is actively counterproductive:
 
-Adam lr, swept at the chosen depth (val, never test):
+    gates    shape         receptive field   val
+     3392    w1024  d3          16/784      62.03
+     5440    w1024  d5          64/784      64.08
+     8512    w1024  d8         496/784      63.78
+    11584    w1024  d11        784/784      60.47     <- every gate sees every pixel, and it is WORSE
+    14656    w1024  d14        784/784      57.40
+     6464    w2048  d3          16/784      67.03     <- sees 16 pixels, beats the one that sees 784
+    41280    w8192  d5          64/784      71.62
 
-    (filled in from the lr sweep)
+DFA's decay with depth dominates any receptive-field benefit, so the rule is depth 5 and spend the
+budget on width instead. A fine scan at w8192 confirms it: d2 66.6, d3 69.8, d4 70.6, d5 71.6,
+d6 68.6, d7 68.5.
+
+READOUT is the real lever, and it was starving the model. At w8192 d5:
+
+    readout   320    640    1280   2560   5120   10240  20480
+    val       72.67  78.45  83.52  87.27  89.45  91.20  92.95
+
++20 points for gates that are a rounding error next to the body. Rebalancing follows: w2048 d5 with
+a 10240 readout gets 91.47% in 20,480 gates, while w8192 d5 with a 320 readout spends twice that
+for 72.67%. The readout is where a DFA net wants its silicon, because it is the one layer whose
+delta is the true gradient rather than a random projection.
+
+BITS. bits=1 wins on BOTH axes -- it is the most accurate and it is free (`pix > 127` is bit 7, a
+wire). At w8192 d5 r1280: bits 1 -> 83.60, 2 -> 81.63, 3 -> 80.70, 7 -> 74.20.
+
+LR. Flat; 0.01 is the peak. At w8192 d5 r1280: 0.005 -> 82.35, 0.01 -> 84.37, 0.02 -> 83.72,
+0.05 -> 81.78, 0.1 -> 82.38. Adam's per-parameter normalisation is doing the work that makes DFA's
+notorious sensitivity to the scale of B_l a non-issue.
+
+WIDTH saturates around 8192 (at d5 r1280: 2048 -> 79.10, 4096 -> 81.55, 8192 -> 83.47,
+16384 -> 82.78, 32768 -> 82.82), which is why the large points grow the readout, not the body.
 """
 
 from __future__ import annotations
@@ -69,13 +99,21 @@ from mnistbench.spec import Submission
 
 TITLE = "dfa (fixed butterfly wiring, direct feedback alignment)"
 
-# depth = log2(width) + 1: the shallowest butterfly that mixes every pixel into every readout gate
-# (verified by receptive_field(), not assumed). Deeper only costs DFA accuracy; see the docstring.
+# Every point is the winner of a measured sweep at its size, not a guess (see the docstring). The
+# shape rule that fell out: 5 layers, bits 1, and spend everything else on the READOUT.
+#
+# The knob is `layers`, NOT `depth`: bench.merge_record merges the MEASURED fields over this dict,
+# and one of them is "depth" (the synthesized netlist's longest-path level count). A POINTS key
+# named `depth` is silently overwritten -- results.json then reports depth 192 for a 5-layer net,
+# and nobody can rebuild the record from its own results. Never name a POINTS key after a measured
+# field: ge, area_um2, cells, nand, inv, depth, test_acc, val_acc, train_s, device, seed, test_ce,
+# ce_temp.
 POINTS = [
-    {"name": "xs", "bits": 1, "width": 1024, "depth": 11, "readout": 320, "epochs": 60},
-    {"name": "s", "bits": 1, "width": 2048, "depth": 12, "readout": 640, "epochs": 60},
-    {"name": "m", "bits": 3, "width": 4096, "depth": 13, "readout": 640, "epochs": 60},
-    {"name": "l", "bits": 3, "width": 8192, "depth": 14, "readout": 1280, "epochs": 50},
+    {"name": "xs", "bits": 1, "width": 256, "layers": 5, "readout": 640, "epochs": 60},
+    {"name": "s", "bits": 1, "width": 512, "layers": 5, "readout": 1280, "epochs": 60},
+    {"name": "m", "bits": 1, "width": 1024, "layers": 5, "readout": 5120, "epochs": 60},
+    {"name": "l", "bits": 1, "width": 2048, "layers": 5, "readout": 10240, "epochs": 60},
+    {"name": "xl", "bits": 1, "width": 4096, "layers": 5, "readout": 20480, "epochs": 60},
 ]
 
 
@@ -216,10 +254,10 @@ def _encode(pix: torch.Tensor, net: ButterflyNet) -> torch.Tensor:
 
 
 class DfaLut(Submission):
-    def __init__(self, bits: int, width: int, depth: int, readout: int, epochs: int,
-                 lr: float = 0.02, batch: int = 256, patience: int = 8,
+    def __init__(self, bits: int, width: int, layers: int, readout: int, epochs: int,
+                 lr: float = 0.01, batch: int = 256, patience: int = 12,
                  evals_per_epoch: int = 1) -> None:
-        self.cfg = dict(bits=bits, width=width, depth=depth, readout=readout, epochs=epochs,
+        self.cfg = dict(bits=bits, width=width, layers=layers, readout=readout, epochs=epochs,
                         lr=lr, batch=batch, patience=patience, evals_per_epoch=evals_per_epoch)
         self.net: ButterflyNet | None = None
 
@@ -228,7 +266,7 @@ class DfaLut(Submission):
         c = self.cfg
         torch.manual_seed(seed)
         g = torch.Generator(device=device).manual_seed(seed)
-        net = ButterflyNet(c["bits"], c["width"], c["depth"], c["readout"], device, g)
+        net = ButterflyNet(c["bits"], c["width"], c["layers"], c["readout"], device, g)
 
         enc_tr = _encode(_t(data.train_x, device), net)  # (n_in, N)
         y_tr = _t(data.train_y, device).long()
@@ -303,7 +341,7 @@ class DfaLut(Submission):
     def _chunk(self) -> int:
         """Rows per forward pass: acts is (n_sig, rows) uint8, so cap that at ~256 MB."""
         c = self.cfg
-        n_sig = N_PIXELS * c["bits"] + c["width"] * c["depth"] + c["readout"]
+        n_sig = N_PIXELS * c["bits"] + c["width"] * c["layers"] + c["readout"]
         return max(64, min(4096, 2**28 // n_sig))
 
     @torch.no_grad()
