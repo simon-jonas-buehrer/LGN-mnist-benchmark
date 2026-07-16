@@ -38,12 +38,13 @@ from mnistbench.spec import Submission
 
 TITLE = "es (fixed butterfly wiring, evolution strategies on gate tables)"
 
-# depth = log2(width) + 1: the shallowest butterfly in which every readout gate sees every pixel.
+# depth is derived from width (build() sets log2(width)+1, the shallowest full-receptive-field
+# butterfly), so a point is just a width and encoder resolution -- one knob for the size axis.
 POINTS = [
-    {"name": "xs", "bits": 1, "width": 1024, "depth": 11, "readout": 320},
-    {"name": "s", "bits": 1, "width": 2048, "depth": 12, "readout": 640},
-    {"name": "m", "bits": 3, "width": 4096, "depth": 13, "readout": 640},
-    {"name": "l", "bits": 3, "width": 8192, "depth": 14, "readout": 1280},
+    {"name": "xs", "bits": 1, "width": 1024, "readout": 320},
+    {"name": "s", "bits": 1, "width": 2048, "readout": 640},
+    {"name": "m", "bits": 3, "width": 4096, "readout": 640},
+    {"name": "l", "bits": 3, "width": 8192, "readout": 1280},
 ]
 
 
@@ -152,13 +153,22 @@ def _margin(votes: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return true - wrong
 
 
+def _rank_util(f: torch.Tensor) -> torch.Tensor:
+    """Centered rank utilities in [-0.5, 0.5] (fitness shaping: only the ordering matters)."""
+    order = f.argsort()
+    ranks = torch.empty_like(f)
+    ranks[order] = torch.arange(len(f), dtype=f.dtype, device=f.device)
+    return ranks / (len(f) - 1) - 0.5
+
+
 class EvoStrat(Submission):
     def __init__(self, bits: int, width: int, depth: int, readout: int, gens: int = 20000,
-                 rollouts: int = 32, batch: int = 8192, lr: float = 0.2, rule: str = "cem",
-                 elite: float = 0.25, patience: int = 20, eval_every: int = 200) -> None:
+                 rollouts: int = 32, batch: int = 8192, lr: float = 1.0, rule: str = "es",
+                 sigma: float = 0.3, elite: float = 0.25, patience: int = 20,
+                 eval_every: int = 200) -> None:
         self.cfg = dict(bits=bits, width=width, depth=depth, readout=readout, gens=gens,
-                        rollouts=rollouts, batch=batch, lr=lr, rule=rule, elite=elite,
-                        patience=patience, eval_every=eval_every)
+                        rollouts=rollouts, batch=batch, lr=lr, rule=rule, sigma=sigma,
+                        elite=elite, patience=patience, eval_every=eval_every)
         self.net: MonarchES | None = None
 
     def train(self, data: Mnist, *, device: str = "cpu", seed: int = 0) -> None:
@@ -179,27 +189,47 @@ class EvoStrat(Submission):
             idx = torch.randint(enc_tr.shape[1], (c["batch"],), generator=g, device=device)
             xb, yb = enc_tr[:, idx], y_tr[idx]
 
-            rolls, R = [], []
-            for _ in range(N):
-                bits = [(torch.rand(p.shape, generator=g, device=device) < p) for p in net.p]
-                R.append(_margin(net.forward(xb, [b.to(torch.uint8) for b in bits]), yb).mean().item())
-                rolls.append(bits)
-            Rt = torch.tensor(R, device=device)
-
-            if c["rule"] == "cem":
-                # move each probability toward the mean bit of the top-e rollouts (elite selection)
-                elite = torch.topk(Rt, n_elite).indices.tolist()
+            if c["rule"] == "es":
+                # OpenAI-ES: antithetic Gaussian perturbations of the probability state, rank-shaped.
+                # A small sigma flips only the near-0.5 (uncertain) entries, so each rollout is LOCAL
+                # to the current circuit -- the signal a max-variance Bernoulli resample destroys.
+                sig = c["sigma"]
+                P = max(1, N // 2)
+                eps = [[torch.randn(p.shape, generator=g, device=device) for p in net.p]
+                       for _ in range(P)]
+                fp, fm = [], []
+                for i in range(P):
+                    bp = [((net.p[l] + sig * eps[i][l]) > 0.5).to(torch.uint8)
+                          for l in range(len(net.p))]
+                    bm = [((net.p[l] - sig * eps[i][l]) > 0.5).to(torch.uint8)
+                          for l in range(len(net.p))]
+                    fp.append(_margin(net.forward(xb, bp), yb).mean().item())
+                    fm.append(_margin(net.forward(xb, bm), yb).mean().item())
+                u = _rank_util(torch.tensor(fp + fm, device=device))
+                du = (u[:P] - u[P:]).tolist()                 # antithetic advantage per pair
                 for l in range(len(net.p)):
-                    em = torch.stack([rolls[i][l].float() for i in elite]).mean(0)
-                    net.p[l] = ((1 - c["lr"]) * net.p[l] + c["lr"] * em).clamp(0.02, 0.98)
+                    grad = sum(du[i] * eps[i][l] for i in range(P))
+                    net.p[l] = (net.p[l] + c["lr"] / (P * sig) * grad).clamp(0.02, 0.98)
             else:
-                # REINFORCE with leave-one-out baseline (higher variance)
-                adv = Rt - (Rt.sum() - Rt) / (N - 1)
-                adv = adv / (adv.std() + 1e-8)
-                for i, bits in enumerate(rolls):
+                rolls, R = [], []
+                for _ in range(N):
+                    bits = [(torch.rand(p.shape, generator=g, device=device) < p) for p in net.p]
+                    R.append(_margin(net.forward(xb, [b.to(torch.uint8) for b in bits]),
+                                     yb).mean().item())
+                    rolls.append(bits)
+                Rt = torch.tensor(R, device=device)
+                if c["rule"] == "cem":
+                    elite = torch.topk(Rt, n_elite).indices.tolist()
                     for l in range(len(net.p)):
-                        net.p[l] = (net.p[l] + c["lr"] / N * adv[i].item()
-                                    * (bits[l].float() - net.p[l])).clamp(0.02, 0.98)
+                        em = torch.stack([rolls[i][l].float() for i in elite]).mean(0)
+                        net.p[l] = ((1 - c["lr"]) * net.p[l] + c["lr"] * em).clamp(0.02, 0.98)
+                else:                                          # reinforce, LOO baseline
+                    adv = Rt - (Rt.sum() - Rt) / (N - 1)
+                    adv = adv / (adv.std() + 1e-8)
+                    for i, bits in enumerate(rolls):
+                        for l in range(len(net.p)):
+                            net.p[l] = (net.p[l] + c["lr"] / N * adv[i].item()
+                                        * (bits[l].float() - net.p[l])).clamp(0.02, 0.98)
 
             if (it + 1) % c["eval_every"] == 0 or it + 1 == c["gens"]:
                 acc = self._accuracy(net, enc_va, y_va)
@@ -255,4 +285,9 @@ class EvoStrat(Submission):
 
 
 def build(**point) -> Submission:
+    # depth is not free to choose: the butterfly reaches full receptive field in exactly
+    # log2(width) stages, so depth = log2(width) + 1 body layers is the smallest net in which every
+    # readout gate sees every pixel. Fewer layers = blind gates; more = wasted depth (and every
+    # extra layer is harder for a gradient-free method). So width alone sets the model size.
+    point.setdefault("depth", _log2(point["width"]) + 1)
     return EvoStrat(**point)
