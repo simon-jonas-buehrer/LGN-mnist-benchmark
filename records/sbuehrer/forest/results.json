@@ -1,0 +1,26 @@
+{
+  "record": "sbuehrer/forest",
+  "title": "forest (SAMME-boosted decision trees, integer-weighted vote)",
+  "points": [
+    {
+      "name": "tiny",
+      "trees": 5,
+      "leaves": 8,
+      "wbits": 2,
+      "bits": 3,
+      "ge": 675.7,
+      "area_um2": 2536.2,
+      "cells": 512,
+      "nand": 471,
+      "inv": 294,
+      "depth": 115,
+      "test_acc": 67.07,
+      "val_acc": 66.13,
+      "train_s": 52,
+      "device": "cpu",
+      "seed": 0,
+      "test_ce": 1.0623,
+      "ce_temp": 0.1372
+    }
+  ]
+}
