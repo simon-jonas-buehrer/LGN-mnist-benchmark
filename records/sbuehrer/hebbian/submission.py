@@ -39,13 +39,19 @@ from mnistbench.spec import Submission
 
 TITLE = "hebbian (target-clamped local plasticity)"
 
-# Same fixed butterfly family as the targetprop/DFA records, but with a different local update.
-# `epochs` is a ceiling: validation early-stopping decides where each point actually stops.
+# Same fixed butterfly family as the DFA record, but with a different local update.  The knob is
+# `layers`, not `depth`: `bench.run_point` merges the measured netlist fields over the POINTS dict
+# and one of them is `depth`, so a POINTS key of that name is silently overwritten in results.json.
+#
+# The ladder is shallow with a wide readout because that is what the sweep measured (see README):
+# this rule gets its accuracy from the width of the grouped vote, not from body depth.  `epochs` is
+# a ceiling: validation early-stopping decides where each point actually stops.
 POINTS = [
-    {"name": "xs", "bits": 1, "width": 1024, "depth": 11, "readout": 320, "epochs": 80},
-    {"name": "s", "bits": 1, "width": 2048, "depth": 12, "readout": 640, "epochs": 80},
-    {"name": "m", "bits": 3, "width": 4096, "depth": 13, "readout": 640, "epochs": 80},
-    {"name": "l", "bits": 3, "width": 8192, "depth": 14, "readout": 1280, "epochs": 60},
+    {"name": "xs", "bits": 1, "width": 512, "layers": 3, "readout": 640, "epochs": 80},
+    {"name": "s", "bits": 1, "width": 1024, "layers": 3, "readout": 2560, "epochs": 80},
+    {"name": "m", "bits": 1, "width": 2048, "layers": 3, "readout": 5120, "epochs": 80},
+    {"name": "l", "bits": 1, "width": 4096, "layers": 3, "readout": 10240, "epochs": 60},
+    {"name": "xl", "bits": 1, "width": 8192, "layers": 3, "readout": 20480, "epochs": 60},
 ]
 
 
@@ -92,7 +98,7 @@ class HebbianNet:
         self,
         bits: int,
         width: int,
-        depth: int,
+        layers: int,
         readout: int,
         device: str,
         g: torch.Generator,
@@ -106,7 +112,7 @@ class HebbianNet:
         self.thresholds = even_thresholds(bits)
         self.n_in = N_PIXELS * bits
         self.device = device
-        self.widths = [width] * depth + [readout]
+        self.widths = [width] * layers + [readout]
         self.tau = max(1.0, (readout // N_CLASSES) ** 0.5)
 
         self.offs = [self.n_in]
@@ -182,7 +188,7 @@ class HebbianLut(Submission):
         self,
         bits: int,
         width: int,
-        depth: int,
+        layers: int,
         readout: int,
         epochs: int,
         batch: int = 4096,
@@ -194,7 +200,7 @@ class HebbianLut(Submission):
         self.cfg = dict(
             bits=bits,
             width=width,
-            depth=depth,
+            layers=layers,
             readout=readout,
             epochs=epochs,
             batch=batch,
@@ -211,7 +217,7 @@ class HebbianLut(Submission):
         torch.manual_seed(seed)
         g = torch.Generator(device=device).manual_seed(seed)
         net = HebbianNet(
-            c["bits"], c["width"], c["depth"], c["readout"], device, g, c["assembly_frac"]
+            c["bits"], c["width"], c["layers"], c["readout"], device, g, c["assembly_frac"]
         )
 
         enc_tr = _encode(_t(data.train_x, device), net)
@@ -280,7 +286,7 @@ class HebbianLut(Submission):
 
     def _chunk(self) -> int:
         c = self.cfg
-        n_sig = N_PIXELS * c["bits"] + c["width"] * c["depth"] + c["readout"]
+        n_sig = N_PIXELS * c["bits"] + c["width"] * c["layers"] + c["readout"]
         return max(64, min(4096, 2**28 // n_sig))
 
     @torch.no_grad()
