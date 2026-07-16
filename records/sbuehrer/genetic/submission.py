@@ -45,15 +45,18 @@ TITLE = "genetic (learned wiring, all gates NAND)"
 NAND_TT = 0b0111  # bit (2a+b) of ~(a & b): f(0,0)=f(0,1)=f(1,0)=1, f(1,1)=0
 
 # `gens` is a ceiling, not a target: training stops when validation has not improved for `patience`
-# evaluations, so each point runs to its own convergence. Five points; the hill-climber weakens as
-# the net grows (a random rewiring helps less and less), so the top of this curve shows where a
-# gradient-free search runs out of steam.
+# evaluations, so each point runs to its own convergence. Four points; the hill-climber weakens as
+# the net grows (a random rewiring helps less and less), so the top of this curve is where a
+# gradient-free search runs out of steam. `l` IS that top: a fifth point at (8000, 8000, 8000,
+# 2400) was measured to 525k generations over 16 GPU-hours and reached 86.2% val, still climbing by
+# ~0.02 a time, while `l` gets 87.3% for a third of the area. It was not a budget away from paying
+# off -- a bigger net makes each single-wire rewiring matter less, which is the same wall the curve
+# already shows, so the point was dropped rather than left unmeasured.
 POINTS = [
     {"name": "xs", "bits": 1, "widths": (256, 256, 160), "gens": 2000000},
     {"name": "s", "bits": 1, "widths": (1024, 1024, 320), "gens": 2000000},
     {"name": "m", "bits": 3, "widths": (2048, 2048, 2048, 640), "gens": 2000000},
     {"name": "l", "bits": 3, "widths": (4096, 4096, 4096, 4096, 1280), "gens": 2000000},
-    {"name": "xl", "bits": 3, "widths": (8000, 8000, 8000, 2400), "gens": 2000000},
 ]
 
 

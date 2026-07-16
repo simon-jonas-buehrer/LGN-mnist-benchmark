@@ -40,7 +40,12 @@ be divisible by 10).
 | s | 1 | 1024, 1024, 320 |
 | m | 3 | 2048, 2048, 2048, 640 |
 | l | 3 | 4096 x 4, 1280 |
-| xl | 3 | 8000, 8000, 8000, 2400 |
+
+`l` is the top of this curve, and it is a wall rather than a budget. A fifth point at
+`8000, 8000, 8000, 2400` ran 16 GPU-hours to 525k generations, reached 86.2% val and was still
+gaining ~0.02 at a time, while `l` gets 87.3% for a third of the area: bigger, slower, and worse.
+The wider the net, the less one rewired wire moves the margin, which is the same effect the curve
+flattens under. So the record stops at `l`.
 
 ```bash
 python -m mnistbench run records/sbuehrer/genetic --device cuda
