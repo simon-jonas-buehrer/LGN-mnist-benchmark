@@ -70,6 +70,12 @@ random projection, and it is where a DFA net wants its silicon.
 | s | 1 | 512 | 5 | 1,280 | 13,036 | 79.29% |
 | m | 1 | 1024 | 5 | 5,120 | 45,455 | 89.04% |
 | l | 1 | 2048 | 5 | 10,240 | 91,506 | 91.53% |
+| xl | 1 | 4096 | 5 | 20,480 | 174,903 | 93.40% |
+
+The knob is `layers`, **not** `depth`: `bench.merge_record` merges the measured fields over the
+`POINTS` dict, and one of them is `depth` (the synthesized netlist's longest-path level count). A
+`POINTS` key named `depth` is silently overwritten, and `results.json` then reports depth 192 for a
+5-layer net — leaving the record unbuildable from its own results.
 
 ```bash
 python -m mnistbench run records/sbuehrer/dfa --device cuda

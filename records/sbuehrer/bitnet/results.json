@@ -1,0 +1,50 @@
+{
+  "record": "sbuehrer/bitnet",
+  "title": "bitnet (ternary weights, binary activations, dense)",
+  "points": [
+    {
+      "name": "xs",
+      "bits": 1,
+      "hidden": [
+        64
+      ],
+      "readout": 320,
+      "epochs": 60,
+      "ge": 233380.3,
+      "area_um2": 876016.4,
+      "cells": 161147,
+      "nand": 200710,
+      "inv": 91336,
+      "depth": 439,
+      "test_acc": 90.57,
+      "val_acc": 90.03,
+      "train_s": 24,
+      "device": "cuda",
+      "seed": 0,
+      "test_ce": 0.3608,
+      "ce_temp": 0.1786
+    },
+    {
+      "name": "s",
+      "bits": 1,
+      "hidden": [
+        128
+      ],
+      "readout": 320,
+      "epochs": 60,
+      "ge": 482469.0,
+      "area_um2": 1810995.6,
+      "cells": 332731,
+      "nand": 415065,
+      "inv": 188062,
+      "depth": 457,
+      "test_acc": 91.96,
+      "val_acc": 91.75,
+      "train_s": 30,
+      "device": "cuda",
+      "seed": 0,
+      "test_ce": 0.3281,
+      "ce_temp": 0.1786
+    }
+  ]
+}
