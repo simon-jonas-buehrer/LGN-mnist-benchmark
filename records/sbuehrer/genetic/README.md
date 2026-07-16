@@ -21,14 +21,8 @@ Three details that matter:
   plateau into a slope.
 * The selection batch must be big. One rewired wire moves the margin by a hair; a small batch
   buries that in sampling noise, so selection keeps the luckier mutant rather than the better one.
-  Measured on `xs`, 20k generations, nothing else changed:
-
-  | selection batch | val accuracy |
-  |---|---|
-  | 1024 | 22.6% |
-  | 4096 | 24.9% |
-  | 8192 | 60.4% |
-
+  It is worth tens of points, not a few: on `xs`, batch 1024 lands at 22.6% where batch 8192 lands
+  at 60.4%, nothing else changed. `batch=16384` is where it saturates.
 * Delta forward. A mutant differs from the incumbent only from its lowest mutated layer upward, so
   every layer below is reused. Exact, and it is most of the speed.
 

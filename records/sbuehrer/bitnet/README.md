@@ -26,13 +26,13 @@ ternary layer width (divisible by 10). Training early-stops on validation.
 
 Each point is the best width/depth for its gate budget, from a validation sweep.
 
-| point | bits | hidden | readout | val |
-|---|---|---|---|---|
-| xs | 1 | 64 | 320 | 90.0% |
-| s | 1 | 128 | 320 | 91.7% |
-| m | 1 | 256, 256 | 320 | 93.3% |
-| l | 1 | 512 | 640 | 94.4% |
-| xl | 3 | 512, 512 | 640 | 96.2% |
+| point | bits | hidden | readout |
+|---|---|---|---|
+| xs | 1 | 64 | 320 |
+| s | 1 | 128 | 320 |
+| m | 1 | 256, 256 | 320 |
+| l | 1 | 512 | 640 |
+| xl | 3 | 512, 512 | 640 |
 
 Ternary arithmetic is dense, so these land in the millions of gate equivalents, far above the
 logic-gate records. That is the point of the comparison.

@@ -21,9 +21,17 @@ boosted tree on the same axis.
 ![accuracy vs circuit size](results/pareto_acc.png)
 ![loss vs circuit size](results/pareto_loss.png)
 
-The two example records cross. Below a few thousand gates the genetic search wins; above that,
-backprop pulls ahead. Solid dots are measured. The dashed line is a power-law fit, drawn past the
-largest circuit we actually built.
+Solid dots are measured. The dashed line is a power-law fit, drawn past the largest circuit we
+actually built.
+
+Six records compete so far, and they do not agree. A boosted tree ensemble (`forest`) holds the
+whole frontier; `backprop`, which learns the truth tables *and* the wiring, is the best of the
+logic nets and wins over gradient-free search (`genetic`) above a few thousand gates. Removing the
+backward pass costs a lot and removing the learned wiring costs more: `dfa` and `hebbian` fix the
+wiring and teach the tables with a random projection of the error or a purely local rule, and both
+sit below the frontier everywhere. Dense ternary arithmetic (`bitnet`) is the most accurate per
+*parameter* and the least accurate per *gate*, landing in the millions of GE. That is the
+comparison this benchmark exists to make.
 
 Every point trains until it stops improving on the validation set, not to a fixed step count.
 
@@ -116,12 +124,18 @@ mnistbench/     the harness
 records/sbuehrer/
   backprop/     learns each gate and its wiring by gradient descent
   genetic/      fixes every gate to NAND, learns only the wiring by mutation
+  dfa/          fixes the wiring, learns the tables by direct feedback alignment
+  hebbian/      fixes the wiring, learns the tables by a local three-factor rule
+  forest/       SAMME-boosted decision trees over the thermometer bits
+  bitnet/       ternary weights, binary activations, dense arithmetic
 ```
 
-The two records are a matched pair: same encoder, same readout, same gate budget. The only
-difference is the optimizer, one with a gradient and one without. Every gate can be a NAND, and
-NANDs alone can build any circuit, so the genetic search could in principle find anything backprop
-finds. What sets them apart is the search, not the model.
+The records share an encoder and a readout, so what differs between their curves is the optimizer
+and the model it searches over. `backprop` and `genetic` are the tightest pair: same encoder, same
+readout, same gate budget, one with a gradient and one without. Every gate can be a NAND, and NANDs
+alone can build any circuit, so the genetic search could in principle find anything backprop finds.
+What sets them apart is the search, not the model. `dfa` and `hebbian` are the other controlled
+pair: identical fixed butterfly wiring, differing only in what teaches the tables.
 
 ## Running the scorer
 
