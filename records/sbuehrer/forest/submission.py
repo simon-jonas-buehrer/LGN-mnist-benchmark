@@ -13,17 +13,26 @@ forest trains in seconds.
 
 Three things make this cheap in silicon, and they are the record's actual claims:
 
-  SAMME, not gradient boosting. This is the whole ballgame. Gradient boosting puts a real-valued
-  10-vector on every LEAF, so the head must sum T*L weighted terms per class. SAMME puts one
-  class on each leaf and one weight on each TREE, so the head sums T terms per class -- a factor
-  of L fewer. Measured in sky130, a full adder (fa_1) is 20.02 um^2 = 5.33 GE while a NAND2 is
-  1.00 GE, so arithmetic costs ~4x a conjunction and the head is where a tree ensemble dies:
+  SAMME, not gradient boosting -- but NOT for the reason it is tempting to give. The tempting
+  argument is that GBDT puts a real-valued 10-vector on every LEAF, so its head sums T*L terms
+  per class against SAMME's T. That is only true of a NAIVE emission. Exactly one leaf per tree
+  is hot, so a tree's contribution to a class is a selected constant either way, and the same
+  one-hot collapse used below flattens GBDT's leaf dimension too: both heads end up ~B adder
+  bits per tree per class. The adders are a wash. SAMME wins on the SELECT network and the tree
+  count instead:
 
-      head                                    adder input bits    GE @ T=40, L=128, B=3
-      per-leaf 10-vector (GBDT/XGBoost)       T*L*10*B/2          ~768,000
-      per-tree alpha (SAMME)                  T*10*B/2                ~3,000
+    * The class indicator partitions. Each leaf carries exactly ONE class, so the ten per-class
+      ORs are disjoint and cost ~L per tree in total. A per-leaf weight vector needs, for every
+      (class, weight-bit) pair, an OR over an arbitrary ~L/2 subset of leaves -- 10*B overlapping
+      OR-trees, ~5*B*L per tree, i.e. ~15x more select logic at B=3.
+    * One trie feeds ten classes. A SAMME tree scores all 10 classes from a single reach network.
+      Multiclass GBDT grows one tree PER CLASS per round -- 10x the trie logic for the same
+      number of boosting rounds.
 
-  Buy conjunctions, not arithmetic.
+  And arithmetic really is the expensive part, more so than the cell list suggests: ABC does not
+  instantiate the sky130 fa_1 cell (5.33 GE) at all, it builds a full adder from 2x xor2 + maj3
+  (~7.3 GE), and a measured popcount+argmax head costs ~9.7 GE PER VOTE BIT -- more than the
+  entire d=8 conjunction it is summing (~5 GE). Buy conjunctions, not arithmetic.
 
   Leaf indicators as `reach` wires, not flat ANDs. reach(child) = reach(parent) & +/-literal is
   exactly 2 gates per internal node, so a tree costs 2(L-1) gates REGARDLESS OF ITS SHAPE. Area
@@ -41,15 +50,34 @@ Three things make this cheap in silicon, and they are the record's actual claims
 
 The encoder is the harness's own thermometer (hw.even_thresholds), so this record's `bits` means
 exactly what it means in the backprop and genetic records and the comparison is at matched input
-encoding. `pix > 127` is bit 7 of the byte, a wire that costs zero gates -- but that free encoder
-is NOT where the win is, and measuring it said so:
+encoding. `pix > 127` is bit 7 of the byte, a wire that costs zero gates -- and the tempting move
+is to take that free encoder and spend everything else on trees. Measured, that is wrong:
 
-    thermometer bits    val acc @ 40 trees x 128 leaves    encoder cost
-    1  (127)                        94.97%                  0 GE (wires)
-    3  (63,127,191)                 95.90%                  ~750 GE
+    thermometer bits    val acc @ 40 trees x 128 leaves
+    1  (127)                        94.97%      free, and a false economy
+    3  (63,127,191)                 95.90%
 
-The trees dominate the area, so the encoder is ~3% of the circuit and 3 bits buy ~0.9 points for
-~750 GE. Resolution is worth paying for; the free encoder is a rounding error, not a strategy.
+Trees dominate the area, so the encoder is a few percent of the circuit and resolution is cheap:
+every threshold of the form 2^k-1 is a compare of the top bits only (127 -> a wire, 191 -> one
+cell, 63 -> one cell), and only the (pixel, threshold) pairs some node actually splits on get
+emitted at all -- a 5-tree forest touches 33 of 2,352. Buy resolution. It pays most where leaves
+are scarce (at ~400 leaves, bits=7 is worth +1.3 points over bits=3; at ~5,000 leaves, +0.15),
+because with few splits available each one has to carry more information. Three of the seven
+shipped points are bits=7 and none are bits=1.
+
+The (T, L) split at MATCHED SILICON is the one that surprised me, and it is why every point here
+was measured rather than modelled. Boosting theory says spend the leaf budget on many weak
+learners; a leaf-count grid agrees loudly (at ~430 leaves, 27x16 beats 3x128 by 7.7 points on
+val). But leaves are not the axis -- gates are, and vote bits scale with T while leaves scale
+with T*L, so many tiny trees drown in head. At matched GE the ranking inverts:
+
+    ~4k GE      L=16 -> 90.08    L=32 -> 90.62    L=64 -> 91.21
+    ~21k GE     L=32 -> 94.40    L=64 -> 95.97    L=128 -> 96.21
+    ~33k GE     L=128 -> 97.06   L=256 -> 96.82   L=384 -> 96.55
+
+An INTERIOR optimum that drifts right as the budget grows -- neither extreme, and invisible in
+leaf space. The mechanism is in the per-leaf price: an L=128 forest costs ~4.7 GE/leaf, an L=16
+forest ~8.8-10.5, because the head is amortized over 8x fewer leaves.
 
 Thermometer bits rather than the raw pixel bits, even though the raw bits are 2,352 free wires and
 strictly more expressive (a depth-2 path pix[7]=0 & pix[6]=1 encodes intensity in [64,128) at zero
@@ -84,14 +112,20 @@ TITLE = "forest (SAMME-boosted decision trees, integer-weighted vote)"
 
 # `bits` thermometer bits per pixel (hw.even_thresholds, same as the other records), `leaves` the
 # per-tree leaf budget (the ONLY capacity knob -- depth is free, see the docstring), `wbits` the
-# integer tree-weight width. `tiny` is a structural test point, not part of the curve.
+# integer tree-weight width. `trees` is the boosting round count.
+#
+# Not hand-picked: every point is the measured-Pareto winner for its area. A 72-config grid over
+# leaves x wbits x bits was swept (the tree-count axis comes free, since the first t trees ARE the
+# round-t ensemble), 39 candidates were then SYNTHESIZED, and these 7 are what survived on real
+# silicon, thinned to ~1.8x steps. Selection is on val; the harness reports test from the netlist.
 POINTS = [
-    {"name": "tiny", "trees": 5, "leaves": 8, "wbits": 2, "bits": 3},
-    {"name": "xs", "trees": 3, "leaves": 128, "wbits": 3, "bits": 3},
+    {"name": "xxs", "trees": 5, "leaves": 8, "wbits": 2, "bits": 3},
+    {"name": "xs", "trees": 9, "leaves": 16, "wbits": 2, "bits": 7},
     {"name": "s", "trees": 5, "leaves": 128, "wbits": 3, "bits": 3},
     {"name": "m", "trees": 13, "leaves": 128, "wbits": 3, "bits": 3},
-    {"name": "l", "trees": 40, "leaves": 128, "wbits": 3, "bits": 3},
-    {"name": "xl", "trees": 64, "leaves": 256, "wbits": 3, "bits": 3},
+    {"name": "l", "trees": 30, "leaves": 128, "wbits": 2, "bits": 7},
+    {"name": "xl", "trees": 39, "leaves": 256, "wbits": 2, "bits": 3},
+    {"name": "xxl", "trees": 78, "leaves": 256, "wbits": 2, "bits": 7},
 ]
 
 NEG_INF = float("-inf")
