@@ -14,13 +14,15 @@ the probability that entry is 1. Each generation:
   4. REINFORCE update, theta += lr/N * sum_i adv_i * (bits_i - p). Entries that were 1 in the
      better-than-average rollouts get pushed up, and vice versa.
 
-This is the score-function / OpenAI-ES estimator (Salimans et al. 2017) with the RLOO baseline
-that this repo's history found essential for breaking the variance wall. The wiring is a fixed
-Monarch pattern (block-diagonal within groups on even layers, across groups on odd layers), so only
-the tables are learned. The emitted circuit uses the greedy table (theta > 0), which is exactly
-what predict() runs, so the circuit matches predict() bit for bit.
+The default update is elite selection (cross-entropy method / PBIL): keep the top rollouts and move
+each probability toward their mean bit. It is far lower variance than a REINFORCE gradient over
+~16k logits from one scalar reward, which is why it works where plain score-function ES stalls
+(REINFORCE is kept as an option). The wiring is a fixed butterfly (gate j reads j and j ^ (1<<k),
+stride halving each layer), so the receptive field reaches every pixel in log-depth and only the
+tables are learned. The emitted circuit uses the greedy table (p > 0.5), exactly what predict()
+runs, so the circuit matches predict() bit for bit.
 
-Init is random (not residual): a greedy-sampled ES saturates if it starts at identity.
+Init is random (not residual): a sampled ES has nothing to select between if it starts at identity.
 """
 
 from __future__ import annotations
@@ -34,13 +36,14 @@ from mnistbench.data import Mnist, N_CLASSES, N_PIXELS
 from mnistbench.hw import emit_lutnet, even_thresholds
 from mnistbench.spec import Submission
 
-TITLE = "es (fixed Monarch wiring, evolution strategies on gate tables)"
+TITLE = "es (fixed butterfly wiring, evolution strategies on gate tables)"
 
+# depth = log2(width) + 1: the shallowest butterfly in which every readout gate sees every pixel.
 POINTS = [
-    {"name": "xs", "bits": 1, "width": 1024, "depth": 12, "readout": 320},
-    {"name": "s", "bits": 1, "width": 2048, "depth": 14, "readout": 640},
-    {"name": "m", "bits": 3, "width": 4096, "depth": 16, "readout": 640},
-    {"name": "l", "bits": 3, "width": 8192, "depth": 18, "readout": 1280},
+    {"name": "xs", "bits": 1, "width": 1024, "depth": 11, "readout": 320},
+    {"name": "s", "bits": 1, "width": 2048, "depth": 12, "readout": 640},
+    {"name": "m", "bits": 3, "width": 4096, "depth": 13, "readout": 640},
+    {"name": "l", "bits": 3, "width": 8192, "depth": 14, "readout": 1280},
 ]
 
 
@@ -48,27 +51,38 @@ def _t(a: np.ndarray, device: str) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(a)).to(device)
 
 
-def _monarch_groups(in_dim: int, out_dim: int) -> int:
-    g = 256
-    while g > 1 and (in_dim % g or out_dim % g or in_dim // g < 2):
-        g //= 2
-    if g < 2:
-        raise ValueError(f"no monarch grouping for {in_dim}->{out_dim}")
-    return g
+def _log2(n: int) -> int:
+    if n & (n - 1):
+        raise ValueError(f"{n} is not a power of two")
+    return n.bit_length() - 1
 
 
-def _monarch_src(in_dim: int, out_dim: int, parity: int) -> torch.Tensor:
-    """(out_dim, 2) local source indices into `in_dim`, fan-in 2, deterministic Monarch tap."""
-    g = _monarch_groups(in_dim, out_dim)
-    ipg, opg = in_dim // g, out_dim // g
+def _butterfly_src(in_dim: int, out_dim: int, stage: int) -> torch.Tensor:
+    """(2, out_dim) local source indices into `in_dim`, fan-in 2, deterministic butterfly tap.
+
+    Gate j reads j and j ^ (1 << k), with the stride k halving every layer (k cycles over
+    0 .. log2(width)-1), so the receptive field doubles per layer: after log2(width) body layers
+    every gate depends on every pixel. (An earlier Monarch tap used a constant across-group stride
+    g/2 which is a 2-cycle, so the receptive field never grew with depth and the net sat at chance.
+    Verify with receptive_field(), never by eye.)
+    """
     j = torch.arange(out_dim)
-    r, c = j // opg, j % opg
-    t = torch.arange(2)
-    if parity == 0:
-        mon = r[:, None] * ipg + (c[:, None] * 2 + t[None]) % ipg
-    else:
-        mon = ((r[:, None] + t[None] * (g // 2)) % g) * ipg + (c % ipg)[:, None]
-    return mon
+    if in_dim == out_dim:                       # body: the butterfly proper
+        k = stage % _log2(in_dim)
+        return torch.stack([j, j ^ (1 << k)])
+    if out_dim > in_dim:                        # encoder -> first layer: cover every input bit
+        return torch.stack([(2 * j) % in_dim, (2 * j + 1) % in_dim])
+    a = (j * in_dim) // out_dim                 # readout: spread the tap over the last body layer
+    return torch.stack([a, (a + in_dim // 2) % in_dim])
+
+
+def receptive_field(net: "MonarchES") -> np.ndarray:
+    """(readout_width,) how many encoder bits each readout gate actually depends on."""
+    reach = np.eye(net.n_in, dtype=bool)
+    for l, s in enumerate(net.srcs):
+        base = 0 if l == 0 else net.offs[l - 1]
+        reach = reach[s[0].cpu().numpy() - base] | reach[s[1].cpu().numpy() - base]
+    return reach.sum(1)
 
 
 def _encode(pix: torch.Tensor, thresholds) -> torch.Tensor:
@@ -84,6 +98,7 @@ class MonarchES:
                  g: torch.Generator) -> None:
         if readout % N_CLASSES:
             raise ValueError(f"readout {readout} must be divisible by {N_CLASSES}")
+        _log2(width)  # the butterfly needs a power-of-two body; fail loudly, not silently
         self.thresholds = even_thresholds(bits)
         self.n_in = N_PIXELS * bits
         self.device = device
@@ -94,7 +109,8 @@ class MonarchES:
         in_dim, in_base = self.n_in, 0
         self.srcs: list[torch.Tensor] = []
         for l, w in enumerate(self.widths):
-            mon = _monarch_src(in_dim, w, l % 2).T.contiguous()
+            # stage l-1: the encoder layer is not a butterfly stage, so the cycle starts after it
+            mon = _butterfly_src(in_dim, w, l - 1).contiguous()  # (2, w)
             self.srcs.append((mon + in_base).to(device))
             in_base = self.offs[-1]
             self.in_base.append(in_base)

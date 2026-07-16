@@ -1,8 +1,9 @@
-"""sbuehrer/targetprop: fixed Monarch wiring, gate truth tables learned WITHOUT gradients.
+"""sbuehrer/targetprop: fixed butterfly wiring, gate truth tables learned WITHOUT gradients.
 
-The other two records learn the wiring. This one fixes it in a Monarch pattern (block-diagonal
-within groups on even layers, across groups on odd layers) so the receptive field reaches every
-output in log-depth, and learns only the 2-input truth table of each gate.
+The other two records learn the wiring. This one fixes it in a butterfly (FFT) pattern -- gate j
+reads j and j ^ (1 << k), stride k halving every layer -- so the receptive field doubles per layer
+and every gate sees every pixel after log2(width) layers. Only the 2-input truth table of each gate
+is learned.
 
 No gradients. Each iteration:
 
@@ -34,15 +35,16 @@ from mnistbench.data import Mnist, N_CLASSES, N_PIXELS
 from mnistbench.hw import emit_lutnet, even_thresholds
 from mnistbench.spec import Submission
 
-TITLE = "targetprop (fixed Monarch wiring, gradient-free counting)"
+TITLE = "targetprop (fixed butterfly wiring, gradient-free counting)"
 
-TOPO_SEED = 0
-
+# depth = log2(width) + 1: the shallowest butterfly in which every readout gate sees every pixel
+# (verify with receptive_field(); do not assume). The old depths of 20-26 were chosen to buy a
+# receptive field the broken Monarch tap never actually delivered.
 POINTS = [
-    {"name": "xs", "bits": 1, "width": 1024, "depth": 20, "readout": 320},
-    {"name": "s", "bits": 1, "width": 2048, "depth": 22, "readout": 640},
-    {"name": "m", "bits": 3, "width": 4096, "depth": 24, "readout": 640},
-    {"name": "l", "bits": 3, "width": 8192, "depth": 26, "readout": 1280},
+    {"name": "xs", "bits": 1, "width": 1024, "depth": 11, "readout": 320},
+    {"name": "s", "bits": 1, "width": 2048, "depth": 12, "readout": 640},
+    {"name": "m", "bits": 3, "width": 4096, "depth": 13, "readout": 640},
+    {"name": "l", "bits": 3, "width": 8192, "depth": 14, "readout": 1280},
 ]
 
 
@@ -79,7 +81,7 @@ def _butterfly_src(in_dim: int, out_dim: int, stage: int) -> torch.Tensor:
     return torch.stack([a, (a + in_dim // 2) % in_dim])
 
 
-def receptive_field(net: "MonarchNet") -> np.ndarray:
+def receptive_field(net: "ButterflyNet") -> np.ndarray:
     """(readout_width,) how many encoder bits each readout gate actually depends on."""
     reach = np.eye(net.n_in, dtype=bool)
     for l, s in enumerate(net.srcs):
@@ -92,12 +94,13 @@ def receptive_field(net: "MonarchNet") -> np.ndarray:
 _RES_TT = torch.tensor([0, 0, 1, 1], dtype=torch.uint8)
 
 
-class MonarchNet:
-    """Fixed Monarch fan-in-2 wiring; per-gate 4-entry truth table T (learned), soft accumulator Lat."""
+class ButterflyNet:
+    """Fixed butterfly fan-in-2 wiring; per-gate 4-entry truth table T (learned), accumulator Lat."""
 
     def __init__(self, bits: int, width: int, depth: int, readout: int, device: str) -> None:
         if readout % N_CLASSES:
             raise ValueError(f"readout {readout} must be divisible by {N_CLASSES}")
+        _log2(width)  # the butterfly needs a power-of-two body; fail loudly, not silently
         self.bits = bits
         self.thresholds = even_thresholds(bits)
         self.n_in = N_PIXELS * bits
@@ -111,7 +114,8 @@ class MonarchNet:
         in_base = 0
         self.srcs: list[torch.Tensor] = []
         for l, w in enumerate(self.widths):
-            mon = _monarch_src(in_dim, w, l % 2).T.contiguous()  # (2, w) local into in_dim
+            # stage l-1: the encoder layer is not a butterfly stage, so the cycle starts after it
+            mon = _butterfly_src(in_dim, w, l - 1).contiguous()  # (2, w) local into in_dim
             self.srcs.append((mon + in_base).to(device))
             in_base = self.offs[-1]                # next layer reads THIS layer's outputs
             self.in_base.append(in_base)
@@ -150,7 +154,7 @@ class MonarchNet:
                 for t in self.T]
 
 
-def _encode(pix: torch.Tensor, net: MonarchNet) -> torch.Tensor:
+def _encode(pix: torch.Tensor, net: ButterflyNet) -> torch.Tensor:
     """(N,784) uint8 -> (n_in, N) uint8, pixel-major, matching hw.emit_thermometer."""
     thr = torch.tensor(net.thresholds, device=pix.device, dtype=torch.int16)
     bits = pix.to(torch.int16).unsqueeze(-1) > thr  # (N, 784, bits)
@@ -164,12 +168,12 @@ class TargetPropLut(Submission):
         self.cfg = dict(bits=bits, width=width, depth=depth, readout=readout, iters=iters,
                         batch=batch, margin=margin, eta=eta, patience=patience,
                         eval_every=eval_every)
-        self.net: MonarchNet | None = None
+        self.net: ButterflyNet | None = None
 
     def train(self, data: Mnist, *, device: str = "cpu", seed: int = 0) -> None:
         c = self.cfg
         torch.manual_seed(seed)
-        net = MonarchNet(c["bits"], c["width"], c["depth"], c["readout"], device)
+        net = ButterflyNet(c["bits"], c["width"], c["depth"], c["readout"], device)
 
         enc_tr = _encode(_t(data.train_x, device), net)  # (n_in, N)
         y_tr = _t(data.train_y, device).long()
@@ -200,7 +204,7 @@ class TargetPropLut(Submission):
         self.net = net
 
     # ---- the counting update -------------------------------------------------------------
-    def _step(self, net: MonarchNet, enc: torch.Tensor, y: torch.Tensor, eta: float) -> None:
+    def _step(self, net: ButterflyNet, enc: torch.Tensor, y: torch.Tensor, eta: float) -> None:
         B = enc.shape[1]
         acts = net.forward(enc)
 
