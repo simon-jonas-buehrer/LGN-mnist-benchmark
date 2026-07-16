@@ -49,6 +49,30 @@
       "ce_temp": 0.0872
     },
     {
+      "name": "m",
+      "bits": 3,
+      "widths": [
+        2048,
+        2048,
+        2048,
+        640
+      ],
+      "gens": 2000000,
+      "ge": 9146.0,
+      "area_um2": 34330.4,
+      "cells": 6395,
+      "nand": 7665,
+      "inv": 3890,
+      "depth": 191,
+      "test_acc": 86.52,
+      "val_acc": 85.23,
+      "train_s": 38993,
+      "device": "cuda",
+      "seed": 0,
+      "test_ce": 0.4437,
+      "ce_temp": 0.0943
+    },
+    {
       "name": "l",
       "bits": 3,
       "widths": [
