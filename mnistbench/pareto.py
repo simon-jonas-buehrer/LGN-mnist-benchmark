@@ -4,6 +4,19 @@ A point A dominates B if it is at least as accurate and at least as small, and s
 one of the two. The Pareto frontier is the set of points nothing dominates: for a given amount of
 silicon, the best accuracy achieved. The leaderboard is that frontier; there is no single winner
 because best is a curve, not a number.
+
+Two different frontiers are used here, and they are not the same thing:
+
+  Per RECORD (method_frontier, applied to everything below). A record is shown as its own
+  frontier: the best accuracy IT reaches at each size, dropping only points the SAME record beats
+  on both axes. A record that measured a grid keeps its winners and sheds the candidates it
+  already beat, so its curve is monotone instead of a cloud. Nothing here compares records, so a
+  record still appears everywhere it competes, including where it loses to another record.
+
+  Across ALL records (frontier, the `*` column). What no record anywhere beats on both axes.
+
+results.json keeps every measured point either way -- the filtering is a property of the view, not
+of the data.
 """
 
 from __future__ import annotations
@@ -17,8 +30,20 @@ ROOT = Path(__file__).resolve().parent.parent
 RECORDS = ROOT / "records"
 RESULTS = ROOT / "results"
 
-# categorical hues, fixed order, never cycled (see the dataviz palette)
-SERIES = ["#2a78d6", "#1baf7a", "#eda100", "#008300", "#4a3aa7", "#e34948", "#e87ba4", "#7b5cd6"]
+# Categorical hues, fixed order, never cycled: a record's colour follows the record, so adding one
+# never repaints the others.
+#
+# These six are the measured best 6-subset of the palette's eight hues (searched over all 28
+# subsets with the dataviz validator, --pairs all against this surface). Six series on one chart
+# cannot be separated by hue alone: the best any subset reaches is normal-vision dE 15.6 (green vs
+# aqua) and CVD dE 6.9 (deutan, aqua vs red), which is the 6-8 floor band rather than the >=8
+# target. The lines also cross, so any two of them can end up adjacent.
+#
+# So identity is NOT carried by colour alone. Every record gets its own MARKER, which is what makes
+# the pairs above readable, and the leaderboard table is the table view the low-contrast slots
+# (yellow, aqua) oblige. Keep the markers if you touch the colours.
+SERIES = ["#2a78d6", "#1baf7a", "#eda100", "#008300", "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 INK, INK2, MUTED, SURFACE = "#0b0b0b", "#52514e", "#b9b8b4", "#fcfcfb"
 
 
@@ -44,6 +69,19 @@ def frontier(points: list[dict]) -> list[dict]:
         )
     ]
     return sorted(front, key=lambda p: p["ge"])
+
+
+def method_frontier(points: list[dict]) -> list[dict]:
+    """Every record reduced to its OWN frontier, records kept side by side.
+
+    This is per record, never across records: a point is dropped only when the same record has
+    another point that is both smaller and at least as accurate. So a record keeps every size it
+    is the best at, including sizes where some other record beats it outright.
+    """
+    out: list[dict] = []
+    for rec in sorted({p["record"] for p in points}):
+        out.extend(frontier([p for p in points if p["record"] == rec]))
+    return out
 
 
 def _new_ax(plt, title: str, ylabel: str):
@@ -85,6 +123,17 @@ def _powerlaw(ge: np.ndarray, y: np.ndarray) -> "tuple[float, float]":
     return float(np.exp(a)), float(b)
 
 
+def _style(points: list[dict]) -> dict[str, tuple[str, str]]:
+    """record -> (colour, marker), keyed on the record NAME.
+
+    Keyed on the name, not on position in whatever subset a plot happens to draw: the loss plot
+    skips records with no CE, and if the slot came from the loop index the same record would be a
+    different colour on the two plots.
+    """
+    return {rec: (SERIES[i % len(SERIES)], MARKERS[i % len(MARKERS)])
+            for i, rec in enumerate(sorted({p["record"] for p in points}))}
+
+
 def plot_accuracy(points: list[dict], out: Path, extrapolate_to: float = 1e9) -> None:
     """Accuracy vs gate equivalents. Accuracy itself saturates, so the trendline is fit on the
     ERROR (100 - acc), which is a power law, and mapped back -- the same fit as the loss plot,
@@ -94,14 +143,15 @@ def plot_accuracy(points: list[dict], out: Path, extrapolate_to: float = 1e9) ->
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    records = sorted({p["record"] for p in points})
+    style = _style(points)
     fig, ax = _new_ax(plt, "MNIST accuracy vs circuit size", "MNIST test accuracy  (%)")
-    for i, rec in enumerate(records):
+    for rec in sorted({p["record"] for p in points}):
         ps = sorted([p for p in points if p["record"] == rec], key=lambda p: p["ge"])
-        c = SERIES[i % len(SERIES)]
+        c, mk = style[rec]
         ge = np.array([p["ge"] for p in ps], float)
         acc = np.array([p["test_acc"] for p in ps], float)
-        ax.plot(ge, acc, color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
+        ax.plot(ge, acc, color=c, lw=2, marker=mk, ms=8, mec=SURFACE, mew=2,
+                zorder=3, label=rec)
         err = np.clip(100.0 - acc, 1e-3, None)  # power law lives in error space, not accuracy
         if len(ps) >= 2:
             A, b = _powerlaw(ge, err)
@@ -121,10 +171,10 @@ def plot_loss(points: list[dict], out: Path, extrapolate_to: float = 1e9) -> Non
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
 
+    style = _style(points)  # keyed on every record, not just the ones that reported a CE
     pts = [p for p in points if p.get("test_ce") is not None]
     if not pts:
         return
-    records = sorted({p["record"] for p in pts})
     fig, ax = _new_ax(plt, "MNIST loss at a fixed silicon budget  (log-log)",
                       "MNIST test cross-entropy  (log)")
     ax.set_yscale("log")
@@ -132,12 +182,13 @@ def plot_loss(points: list[dict], out: Path, extrapolate_to: float = 1e9) -> Non
     ax.yaxis.set_minor_locator(ticker.NullLocator())
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:g}"))
 
-    for i, rec in enumerate(records):
+    for rec in sorted({p["record"] for p in pts}):
         ps = sorted([p for p in pts if p["record"] == rec], key=lambda p: p["ge"])
-        c = SERIES[i % len(SERIES)]
+        c, mk = style[rec]
         ge = np.array([p["ge"] for p in ps], float)
         ce = np.array([p["test_ce"] for p in ps], float)
-        ax.plot(ge, ce, color=c, lw=2, marker="o", ms=8, mec=SURFACE, mew=2, zorder=3, label=rec)
+        ax.plot(ge, ce, color=c, lw=2, marker=mk, ms=8, mec=SURFACE, mew=2,
+                zorder=3, label=rec)
         # power law CE = A * GE^b is a line in log-log; the dashed part extends it past the last
         # measured point, so solid = measured and dashed = extrapolated.
         if len(ps) >= 2:
@@ -163,15 +214,25 @@ def table(points: list[dict]) -> str:
             f"| {p['depth']} | **{p['test_acc']:.2f}%** | {ce} |"
         )
     lines.append("")
-    lines.append("`*` = on the Pareto frontier (nothing is both smaller and more accurate). "
+    lines.append("`*` = on the Pareto frontier (nothing anywhere is both smaller and more "
+                 "accurate). Each record is listed as its own frontier: a point a record already "
+                 "beats on both axes is dropped, so a record shows one row per size it is best at. "
                  "test CE = calibrated cross-entropy over the circuit's class votes.")
     return "\n".join(lines)
 
 
 def main() -> None:
-    points = load_all()
-    if not points:
+    measured = load_all()
+    if not measured:
         raise SystemExit("no results yet -- run `python -m mnistbench run records/<user>/<method>`")
+    # Show each record as its own frontier. A record that swept a grid measured points it already
+    # beats on both axes; drawing them makes its curve a cloud rather than a line, and they can
+    # never win a row anyway. results.json still holds all of them.
+    points = method_frontier(measured)
+    dropped = len(measured) - len(points)
+    if dropped:
+        print(f"{len(points)} points on their own record's frontier "
+              f"({dropped} dominated within their record, not shown)")
     RESULTS.mkdir(exist_ok=True)
     plot_accuracy(points, RESULTS / "pareto_acc.png")
     plot_loss(points, RESULTS / "pareto_loss.png")
