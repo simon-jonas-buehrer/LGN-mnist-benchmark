@@ -46,6 +46,7 @@ Every point trains until it stops improving on the validation set, not to a fixe
 | * | `sbuehrer/forest` | xxl | 61,304 | 229 | **97.31%** | 0.081 |
 |  | `sbuehrer/backprop` | xl | 156,861 | 285 | **96.93%** | 0.102 |
 | * | `sbuehrer/forest` | xl | 29,776 | 235 | **96.82%** | 0.102 |
+|  | `sbuehrer/bitnet` | xl | 6,348,790 | 871 | **96.31%** | 0.169 |
 | * | `sbuehrer/forest` | l | 15,449 | 206 | **96.08%** | 0.121 |
 |  | `sbuehrer/backprop` | l | 52,973 | 238 | **95.35%** | 0.152 |
 |  | `sbuehrer/bitnet` | l | 2,111,700 | 601 | **94.71%** | 0.208 |
