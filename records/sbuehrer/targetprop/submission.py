@@ -50,27 +50,42 @@ def _t(a: np.ndarray, device: str) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(a)).to(device)
 
 
-def _monarch_groups(in_dim: int, out_dim: int) -> int:
-    g = 256
-    while g > 1 and (in_dim % g or out_dim % g or in_dim // g < 2):
-        g //= 2
-    if g < 2:
-        raise ValueError(f"no monarch grouping for {in_dim}->{out_dim}")
-    return g
+def _log2(n: int) -> int:
+    if n & (n - 1):
+        raise ValueError(f"{n} is not a power of two")
+    return n.bit_length() - 1
 
 
-def _monarch_src(in_dim: int, out_dim: int, parity: int) -> torch.Tensor:
-    """(out_dim, 2) local source indices into `in_dim`, fan-in 2, deterministic Monarch tap."""
-    g = _monarch_groups(in_dim, out_dim)
-    ipg, opg = in_dim // g, out_dim // g
+def _butterfly_src(in_dim: int, out_dim: int, stage: int) -> torch.Tensor:
+    """(2, out_dim) local source indices into `in_dim`, fan-in 2, deterministic butterfly tap.
+
+    Gate j reads j and j ^ (1 << k), with the stride k HALVING every layer (k cycles over
+    0 .. log2(width)-1). That is what makes the receptive field double per layer: after log2(width)
+    body layers, every gate depends on every pixel.
+
+    This replaces the Monarch tap this record used to have, whose across-group factor used a
+    CONSTANT stride of g/2. Applying that twice returns to where it started -- a 2-cycle, not a
+    shuffle -- so the receptive field saturated at 16 encoder bits per readout gate and NEVER grew
+    with depth. A 26-layer net saw exactly as little as a 6-layer one, which is why this record sat
+    at chance no matter how long it trained. Verify with receptive_field(), never by eye.
+    """
     j = torch.arange(out_dim)
-    r, c = j // opg, j % opg
-    t = torch.arange(2)
-    if parity == 0:  # within-group: block-diagonal factor
-        mon = r[:, None] * ipg + (c[:, None] * 2 + t[None]) % ipg
-    else:            # across-group: the transpose factor
-        mon = ((r[:, None] + t[None] * (g // 2)) % g) * ipg + (c % ipg)[:, None]
-    return mon  # (out_dim, 2)
+    if in_dim == out_dim:                       # body: the butterfly proper
+        k = stage % _log2(in_dim)
+        return torch.stack([j, j ^ (1 << k)])
+    if out_dim > in_dim:                        # encoder -> first layer: cover every input bit
+        return torch.stack([(2 * j) % in_dim, (2 * j + 1) % in_dim])
+    a = (j * in_dim) // out_dim                 # readout: spread the tap over the last body layer
+    return torch.stack([a, (a + in_dim // 2) % in_dim])
+
+
+def receptive_field(net: "MonarchNet") -> np.ndarray:
+    """(readout_width,) how many encoder bits each readout gate actually depends on."""
+    reach = np.eye(net.n_in, dtype=bool)
+    for l, s in enumerate(net.srcs):
+        base = 0 if l == 0 else net.offs[l - 1]
+        reach = reach[s[0].cpu().numpy() - base] | reach[s[1].cpu().numpy() - base]
+    return reach.sum(1)
 
 
 # pass-A truth table indexed by p = 2a+b:  T[p] = (p>>1)&1 = a  ->  [0,0,1,1] = tt 0b1100
