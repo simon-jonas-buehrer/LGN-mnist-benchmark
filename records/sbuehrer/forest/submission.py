@@ -11,38 +11,18 @@ best-first on weighted Gini, and over binary features a split search is a single
 (`wyoh.t() @ X` counts, per class, how many weighted samples have each bit set), so the whole
 forest trains in seconds.
 
-Three things make this cheap in silicon, and they are the record's actual claims:
-
-  SAMME, not gradient boosting -- but NOT for the reason it is tempting to give. The tempting
-  argument is that GBDT puts a real-valued 10-vector on every LEAF, so its head sums T*L terms
-  per class against SAMME's T. That is only true of a NAIVE emission. Exactly one leaf per tree
-  is hot, so a tree's contribution to a class is a selected constant either way, and the same
-  one-hot collapse used below flattens GBDT's leaf dimension too: both heads end up ~B adder
-  bits per tree per class. The adders are a wash. SAMME wins on the SELECT network and the tree
-  count instead:
-
-    * The class indicator partitions. Each leaf carries exactly ONE class, so the ten per-class
-      ORs are disjoint and cost ~L per tree in total. A per-leaf weight vector needs, for every
-      (class, weight-bit) pair, an OR over an arbitrary ~L/2 subset of leaves -- 10*B overlapping
-      OR-trees, ~5*B*L per tree, i.e. ~15x more select logic at B=3.
-    * One trie feeds ten classes. A SAMME tree scores all 10 classes from a single reach network.
-      Multiclass GBDT grows one tree PER CLASS per round -- 10x the trie logic for the same
-      number of boosting rounds.
-
-  And arithmetic really is the expensive part, more so than the cell list suggests: ABC does not
-  instantiate the sky130 fa_1 cell (5.33 GE) at all, it builds a full adder from 2x xor2 + maj3
-  (~7.3 GE), and a measured popcount+argmax head costs ~9.7 GE PER VOTE BIT -- more than the
-  entire d=8 conjunction it is summing (~5 GE). Buy conjunctions, not arithmetic.
+Three things make this cheap in silicon:
 
   Leaf indicators as `reach` wires, not flat ANDs. reach(child) = reach(parent) & +/-literal is
   exactly 2 gates per internal node, so a tree costs 2(L-1) gates REGARDLESS OF ITS SHAPE. Area
   depends on the leaf count and not on the depth, which is why max_depth here is non-binding:
   constraining depth would only remove capacity at zero area saving. Emitting each leaf as a flat
-  AND of its d literals and hoping ABC rediscovers the sharing would hand it a 4-5x larger AIG --
-  `strash` merges only structurally identical cones and `resub -K 8` is local, so reconstructing a
-  256-leaf shared prefix from 256 flat conjunctions is a global problem it is not asked to solve.
-  We give ABC the intra-tree sharing we know exactly and let it find the inter-tree sharing we
+  AND of its d literals and hoping ABC rediscovers the sharing would hand it a 4-5x larger AIG, so
+  we give ABC the intra-tree sharing we know exactly and let it find the inter-tree sharing we
   don't.
+
+  The class indicator partitions. Each leaf carries exactly ONE class, so the ten per-class ORs
+  are disjoint and cost ~L per tree in total, and a single reach network scores all ten classes.
 
   Bit-plane popcount. w_t is a constant and v[t][c] is one bit, so
   score_c = sum_b 2^b * popcount({v[t][c] : bit b of w_t set}). A zero weight-bit contributes no
@@ -50,41 +30,12 @@ Three things make this cheap in silicon, and they are the record's actual claims
 
 The encoder is the harness's own thermometer (hw.even_thresholds), so this record's `bits` means
 exactly what it means in the backprop and genetic records and the comparison is at matched input
-encoding. `pix > 127` is bit 7 of the byte, a wire that costs zero gates -- and the tempting move
-is to take that free encoder and spend everything else on trees. Measured, that is wrong:
-
-    thermometer bits    val acc @ 40 trees x 128 leaves
-    1  (127)                        94.97%      free, and a false economy
-    3  (63,127,191)                 95.90%
-
-Trees dominate the area, so the encoder is a few percent of the circuit and resolution is cheap:
-every threshold of the form 2^k-1 is a compare of the top bits only (127 -> a wire, 191 -> one
-cell, 63 -> one cell), and only the (pixel, threshold) pairs some node actually splits on get
-emitted at all -- a 5-tree forest touches 33 of 2,352. Buy resolution. It pays most where leaves
-are scarce (at ~400 leaves, bits=7 is worth +1.3 points over bits=3; at ~5,000 leaves, +0.15),
-because with few splits available each one has to carry more information. Three of the seven
-shipped points are bits=7 and none are bits=1.
-
-The (T, L) split at MATCHED SILICON is the one that surprised me, and it is why every point here
-was measured rather than modelled. Boosting theory says spend the leaf budget on many weak
-learners; a leaf-count grid agrees loudly (at ~430 leaves, 27x16 beats 3x128 by 7.7 points on
-val). But leaves are not the axis -- gates are, and vote bits scale with T while leaves scale
-with T*L, so many tiny trees drown in head. At matched GE the ranking inverts:
-
-    ~4k GE      L=16 -> 90.08    L=32 -> 90.62    L=64 -> 91.21
-    ~21k GE     L=32 -> 94.40    L=64 -> 95.97    L=128 -> 96.21
-    ~33k GE     L=128 -> 97.06   L=256 -> 96.82   L=384 -> 96.55
-
-An INTERIOR optimum that drifts right as the budget grows -- neither extreme, and invisible in
-leaf space. The mechanism is in the per-leaf price: an L=128 forest costs ~4.7 GE/leaf, an L=16
-forest ~8.8-10.5, because the head is amortized over 8x fewer leaves.
-
-Thermometer bits rather than the raw pixel bits, even though the raw bits are 2,352 free wires and
-strictly more expressive (a depth-2 path pix[7]=0 & pix[6]=1 encodes intensity in [64,128) at zero
-encoder cost). Greedy Gini cannot find that: pix[6] alone is non-monotone in intensity and has
-~zero standalone information gain, so it is never selected and the pair is never discovered.
-Thermometer bits are monotone and therefore individually informative -- which is exactly the
-property a greedy builder needs.
+encoding. Thermometer bits rather than the raw pixel bits, even though the raw bits are free wires
+and strictly more expressive: greedy Gini cannot use a bit like pix[6], which is non-monotone in
+intensity and has ~zero standalone information gain, so it is never selected. Thermometer bits are
+monotone and therefore individually informative, which is what a greedy builder needs. What the
+sweeps said about where to spend the budget (encoder resolution, and the tree/leaf split at
+matched silicon) is in the README.
 
 Weights are quantized INSIDE the boosting loop, not rounded afterwards. The sample-weight update
 consumes the integer alpha the circuit will use, so every later tree is fit against the residual

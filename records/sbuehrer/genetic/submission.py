@@ -16,9 +16,8 @@ Three details that matter:
     (votes for the true class minus the best wrong class) moves whenever any vote moves, turning
     the plateau into a slope.
   * The selection batch must be big. One rewired wire moves the margin by a hair; a small batch
-    buries it in sampling noise, so selection keeps the luckier mutant, not the better one. On
-    `xs`, 20k generations, all else equal: batch 1024 -> 22.6%, 4096 -> 24.9%, 8192 -> 60.4%. It
-    saturates on `m` around batch 16384.
+    buries it in sampling noise, so selection keeps the luckier mutant, not the better one (see
+    README for what that costs).
   * Delta forward. A mutant differs from the incumbent only from its lowest mutated layer upward,
     so every layer below is reused. Exact, and most of the speed.
 

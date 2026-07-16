@@ -45,45 +45,7 @@ would never move at all.
 The forward pass is exact boolean, so the val accuracy printed during training IS the circuit's
 accuracy, and the harness's 512-image model-vs-netlist check is a formality rather than a hazard.
 
-Every hyperparameter below is the winner of a sweep, and two of them overturned the design this
-record started with. All numbers are val, never test.
-
-DEPTH. The plan was depth = log2(width)+1, so that the butterfly mixes every pixel into every
-readout gate. That is exactly wrong. A width x depth grid at bits=1, readout=320 says depth is a
-cost with no benefit, and that full mixing is actively counterproductive:
-
-    gates    shape         receptive field   val
-     3392    w1024  d3          16/784      62.03
-     5440    w1024  d5          64/784      64.08
-     8512    w1024  d8         496/784      63.78
-    11584    w1024  d11        784/784      60.47     <- every gate sees every pixel, and it is WORSE
-    14656    w1024  d14        784/784      57.40
-     6464    w2048  d3          16/784      67.03     <- sees 16 pixels, beats the one that sees 784
-    41280    w8192  d5          64/784      71.62
-
-DFA's decay with depth dominates any receptive-field benefit, so the rule is depth 5 and spend the
-budget on width instead. A fine scan at w8192 confirms it: d2 66.6, d3 69.8, d4 70.6, d5 71.6,
-d6 68.6, d7 68.5.
-
-READOUT is the real lever, and it was starving the model. At w8192 d5:
-
-    readout   320    640    1280   2560   5120   10240  20480
-    val       72.67  78.45  83.52  87.27  89.45  91.20  92.95
-
-+20 points for gates that are a rounding error next to the body. Rebalancing follows: w2048 d5 with
-a 10240 readout gets 91.47% in 20,480 gates, while w8192 d5 with a 320 readout spends twice that
-for 72.67%. The readout is where a DFA net wants its silicon, because it is the one layer whose
-delta is the true gradient rather than a random projection.
-
-BITS. bits=1 wins on BOTH axes -- it is the most accurate and it is free (`pix > 127` is bit 7, a
-wire). At w8192 d5 r1280: bits 1 -> 83.60, 2 -> 81.63, 3 -> 80.70, 7 -> 74.20.
-
-LR. Flat; 0.01 is the peak. At w8192 d5 r1280: 0.005 -> 82.35, 0.01 -> 84.37, 0.02 -> 83.72,
-0.05 -> 81.78, 0.1 -> 82.38. Adam's per-parameter normalisation is doing the work that makes DFA's
-notorious sensitivity to the scale of B_l a non-issue.
-
-WIDTH saturates around 8192 (at d5 r1280: 2048 -> 79.10, 4096 -> 81.55, 8192 -> 83.47,
-16384 -> 82.78, 32768 -> 82.82), which is why the large points grow the readout, not the body.
+The shape the sweeps settled on (see README): 5 layers, bits=1, and everything else in the readout.
 """
 
 from __future__ import annotations
@@ -143,7 +105,7 @@ def _butterfly_src(in_dim: int, out_dim: int, stage: int) -> torch.Tensor:
     forever, and applying that twice returns to j -- a 2-cycle, so the receptive field saturates
     after one layer and depth buys nothing. (That is the bug in the Monarch tap this record started
     from; see the README. It is invisible in the wiring and only shows up if you actually trace
-    reachability, which is why `python -m mnistbench` cannot catch it and the selftest below can.)
+    reachability, so no accuracy number names it.)
     """
     j = torch.arange(out_dim)
     if in_dim == out_dim:                       # body: the butterfly proper
@@ -153,19 +115,6 @@ def _butterfly_src(in_dim: int, out_dim: int, stage: int) -> torch.Tensor:
         return torch.stack([(2 * j) % in_dim, (2 * j + 1) % in_dim])
     a = (j * in_dim) // out_dim                 # readout: spread the tap over the last body layer
     return torch.stack([a, (a + in_dim // 2) % in_dim])
-
-
-def receptive_field(net: "ButterflyNet") -> np.ndarray:
-    """(readout_width,) how many encoder bits each readout gate actually depends on.
-
-    Exact reachability over the fixed wiring -- no training, no data. This is the check that
-    catches a mixing bug the accuracy number would only ever hint at.
-    """
-    reach = np.eye(net.n_in, dtype=bool)
-    for l, s in enumerate(net.srcs):
-        base = 0 if l == 0 else net.offs[l - 1]
-        reach = reach[s[0].cpu().numpy() - base] | reach[s[1].cpu().numpy() - base]
-    return reach.sum(1)
 
 
 def hard_bit(z: torch.Tensor) -> torch.Tensor:
@@ -178,12 +127,16 @@ def hard_bit(z: torch.Tensor) -> torch.Tensor:
 # gradient and nothing would ever move.
 _RES_SIGN = torch.tensor([-1.0, -1.0, 1.0, 1.0])
 
+# Symmetry break on top of the residual init: identical latents would get identical updates and the
+# layer would collapse to one gate.
+_JITTER = 0.1
+
 
 class ButterflyNet:
     """Fixed butterfly fan-in-2 wiring; per-gate 4-entry sin latent (learned); fixed random B."""
 
-    def __init__(self, bits: int, width: int, depth: int, readout: int, device: str,
-                 g: torch.Generator, jitter: float = 0.1) -> None:
+    def __init__(self, bits: int, width: int, layers: int, readout: int, device: str,
+                 g: torch.Generator) -> None:
         if readout % N_CLASSES:
             raise ValueError(f"readout {readout} must be divisible by {N_CLASSES}")
         _log2(width)  # the butterfly needs a power-of-two body; fail loudly, not silently
@@ -191,7 +144,7 @@ class ButterflyNet:
         self.thresholds = even_thresholds(bits)
         self.n_in = N_PIXELS * bits
         self.device = device
-        self.widths = [width] * depth + [readout]
+        self.widths = [width] * layers + [readout]
         self.tau = (readout // N_CLASSES) ** 0.5  # keep logits sane, as in the backprop record
 
         # fixed wiring: srcs[l] = (2, w) GLOBAL ids; layer l reads only layer l-1 (or the encoder)
@@ -209,7 +162,7 @@ class ButterflyNet:
         # learned: the only parameters in the whole record
         self.z = [
             (_RES_SIGN.to(device) * (torch.pi / 4)).expand(w, 4).contiguous()
-            + torch.randn(w, 4, generator=g, device=device) * jitter
+            + torch.randn(w, 4, generator=g, device=device) * _JITTER
             for w in self.widths
         ]
         # fixed random feedback: the backward "model". Never learned, never synthesized.
@@ -255,10 +208,9 @@ def _encode(pix: torch.Tensor, net: ButterflyNet) -> torch.Tensor:
 
 class DfaLut(Submission):
     def __init__(self, bits: int, width: int, layers: int, readout: int, epochs: int,
-                 lr: float = 0.01, batch: int = 256, patience: int = 12,
-                 evals_per_epoch: int = 1) -> None:
+                 lr: float = 0.01, batch: int = 256, patience: int = 12) -> None:
         self.cfg = dict(bits=bits, width=width, layers=layers, readout=readout, epochs=epochs,
-                        lr=lr, batch=batch, patience=patience, evals_per_epoch=evals_per_epoch)
+                        lr=lr, batch=batch, patience=patience)
         self.net: ButterflyNet | None = None
 
     @torch.no_grad()

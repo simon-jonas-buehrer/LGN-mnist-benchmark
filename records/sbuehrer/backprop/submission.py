@@ -25,13 +25,7 @@ a softmax mixture of candidate bits (a fraction, with no hardware) would be caug
 The encoder is a thermometer at thresholds 2^k-1, so `pix > 127` is bit 7, a wire that costs no
 gates.
 
-lr=0.2, batch=128, from a 22-config sweep on the `m` point (val, never test):
-
-    lr        0.01   0.02   0.05   0.1    0.2    0.3    0.5    0.8
-    best val  92.15  92.47  92.47  92.78  92.80  92.45  91.55  91.03
-
-The peak is flat: 0.02 to 0.2 all land within 0.3 points, so the result does not depend on a lucky
-setting. At `m` the net converges to ~92.8% for any sane lr; past that needs more gates.
+lr=0.2 and batch=128 are the sweep's pick, on a flat peak (see README).
 """
 
 from __future__ import annotations

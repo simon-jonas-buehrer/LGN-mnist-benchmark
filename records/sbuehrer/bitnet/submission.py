@@ -21,8 +21,6 @@ other records, so only the hidden layers differ.
 
 from __future__ import annotations
 
-import time
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -33,8 +31,9 @@ from mnistbench.spec import Submission
 
 TITLE = "bitnet (ternary weights, binary activations, dense)"
 
-# each point is the best width/depth for its gate budget, from a sweep (val, never test):
-#   (64,) 90.0% | (128,) 91.7% | (256,256) 93.3% | (512,) 94.4% | (512,512) b3 96.2%
+# `bits` thermometer bits per pixel, `hidden` the ternary hidden widths, `readout` the final
+# ternary layer (divisible by 10). `epochs` is a ceiling; validation early-stopping decides where
+# each point stops. Each shape is the best one measured for its gate budget (see README).
 POINTS = [
     {"name": "xs", "bits": 1, "hidden": (64,), "readout": 320, "epochs": 60},
     {"name": "s", "bits": 1, "hidden": (128,), "readout": 320, "epochs": 60},

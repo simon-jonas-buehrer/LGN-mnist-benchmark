@@ -68,6 +68,28 @@
       "seed": 0,
       "test_ce": 0.2572,
       "ce_temp": 0.1775
+    },
+    {
+      "name": "l",
+      "bits": 1,
+      "hidden": [
+        512
+      ],
+      "readout": 640,
+      "epochs": 60,
+      "ge": 2111699.7,
+      "area_um2": 7926475.9,
+      "cells": 1449901,
+      "nand": 1818816,
+      "inv": 824041,
+      "depth": 601,
+      "test_acc": 94.71,
+      "val_acc": 94.37,
+      "train_s": 60,
+      "device": "cuda",
+      "seed": 0,
+      "test_ce": 0.2079,
+      "ce_temp": 0.1629
     }
   ]
 }

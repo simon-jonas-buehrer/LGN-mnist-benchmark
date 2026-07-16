@@ -78,17 +78,11 @@ def _butterfly_src(in_dim: int, out_dim: int, stage: int) -> torch.Tensor:
     return torch.stack([a, (a + in_dim // 2) % in_dim])
 
 
-def receptive_field(net: "HebbianNet") -> np.ndarray:
-    """(readout_width,) exact number of encoder bits each readout gate can depend on."""
-    reach = np.eye(net.n_in, dtype=bool)
-    for l, s in enumerate(net.srcs):
-        base = 0 if l == 0 else net.offs[l - 1]
-        reach = reach[s[0].cpu().numpy() - base] | reach[s[1].cpu().numpy() - base]
-    return reach.sum(1)
-
-
 # pass-A truth table indexed by p = 2a+b: T[p] = a -> [0,0,1,1] = tt 0b1100.
 _RES_TT = torch.tensor([0, 0, 1, 1], dtype=torch.uint8)
+
+# Latent magnitude at init: small enough that the first updates can flip a table entry.
+_INIT = 0.02
 
 
 class HebbianNet:
@@ -103,7 +97,6 @@ class HebbianNet:
         device: str,
         g: torch.Generator,
         assembly_frac: float = 0.3,
-        init: float = 0.02,
     ) -> None:
         if readout % N_CLASSES:
             raise ValueError(f"readout {readout} must be divisible by {N_CLASSES}")
@@ -126,7 +119,7 @@ class HebbianNet:
             in_dim = w
 
         # Latents are signed table preferences.  The emitted table is always hard bits.
-        base = (_RES_TT.float().to(device) * 2 - 1) * init
+        base = (_RES_TT.float().to(device) * 2 - 1) * _INIT
         self.Lat = [base.expand(w, 4).contiguous().clone() for w in self.widths]
         self.T = [(lat > 0).to(torch.uint8) for lat in self.Lat]
 
