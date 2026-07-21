@@ -13,6 +13,7 @@ dependencies = ["numpy>=1.24"]
 [project.optional-dependencies]
 plot = ["matplotlib>=3.7"]        # only for `python -m mnistbench pareto`
 records = ["torch>=2.2"]          # only for the two reference records under records/sbuehrer/
+jax = ["jax>=0.4", "tyro>=0.8"]   # only for records/nherr/ga and records/dmuglich/did
 
 # Scoring also needs yosys + ABC and the sky130 liberty, which are not pip-installable:
 #   conda create -n eda -c conda-forge -c litex-hub yosys open_pdks.sky130a

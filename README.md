@@ -27,14 +27,17 @@ reaches at each size, so a record that swept a grid shows a curve rather than th
 That is per record and never across them, so a record still appears everywhere it competes,
 including where another record beats it outright.
 
-Six records compete so far, and they do not agree. A boosted tree ensemble (`forest`) holds the
-whole frontier; `backprop`, which learns the truth tables *and* the wiring, is the best of the
-logic nets and wins over gradient-free search (`genetic`) above a few thousand gates. Removing the
-backward pass costs a lot and removing the learned wiring costs more: `dfa` and `hebbian` fix the
-wiring and teach the tables with a random projection of the error or a purely local rule, and both
-sit below the frontier everywhere. Dense ternary arithmetic (`bitnet`) is the most accurate per
-*parameter* and the least accurate per *gate*, landing in the millions of GE. That is the
-comparison this benchmark exists to make.
+Seven records compete so far, and they do not agree. A boosted tree ensemble (`forest`) holds most
+of the frontier, but not all of it: below ~8k GE it trades slots with `nherr/ga`, a population that
+evolves the truth tables and a codebook of candidate wirings together. Among the logic nets,
+`backprop` learns tables and wiring by gradient descent and wins above ~10k GE, while `nherr/ga`
+wins below it; both beat `genetic`, which fixes every gate to NAND and evolves the wiring alone, by
+5-8 points at equal area — so *what* the gradient-free search is allowed to change matters more
+than whether it has a gradient. Removing the backward pass costs a lot and removing the learned
+wiring costs more: `dfa` and `hebbian` fix the wiring and teach the tables with a random projection
+of the error or a purely local rule, and both sit below the frontier everywhere. Dense ternary
+arithmetic (`bitnet`) is the most accurate per *parameter* and the least accurate per *gate*,
+landing in the millions of GE. That is the comparison this benchmark exists to make.
 
 Every point trains until it stops improving on the validation set, not to a fixed step count.
 
@@ -56,11 +59,14 @@ Every point trains until it stops improving on the validation set, not to a fixe
 |  | `sbuehrer/dfa` | xl | 174,903 | 313 | **93.40%** | 0.216 |
 |  | `sbuehrer/bitnet` | s | 482,469 | 457 | **91.96%** | 0.328 |
 |  | `sbuehrer/dfa` | l | 91,506 | 282 | **91.53%** | 0.265 |
+| * | `nherr/ga` | m | 7,471 | 169 | **91.37%** | 0.308 |
 |  | `sbuehrer/hebbian` | xl | 135,783 | 284 | **90.61%** | 0.304 |
 |  | `sbuehrer/bitnet` | xs | 233,380 | 439 | **90.57%** | 0.361 |
+| * | `nherr/ga` | s | 4,214 | 164 | **90.17%** | 0.349 |
 |  | `sbuehrer/dfa` | m | 45,455 | 244 | **89.04%** | 0.331 |
 | * | `sbuehrer/forest` | s | 3,027 | 141 | **88.59%** | 0.389 |
 |  | `sbuehrer/hebbian` | l | 71,640 | 270 | **88.48%** | 0.365 |
+| * | `nherr/ga` | xs | 2,109 | 133 | **88.21%** | 0.435 |
 |  | `sbuehrer/backprop` | s | 7,514 | 188 | **87.89%** | 0.390 |
 |  | `sbuehrer/genetic` | l | 20,114 | 206 | **87.28%** | 0.422 |
 |  | `sbuehrer/genetic` | m | 9,146 | 191 | **86.52%** | 0.444 |
@@ -135,6 +141,10 @@ records/sbuehrer/
   hebbian/      fixes the wiring, learns the tables by a local three-factor rule
   forest/       SAMME-boosted decision trees over the thermometer bits
   bitnet/       ternary weights, binary activations, dense arithmetic
+records/nherr/
+  ga/           evolves the truth tables and a codebook of candidate wirings, by a population
+records/dmuglich/
+  did/          same circuit, no population: ranked discrete moves, accepted on measured loss
 ```
 
 The records share an encoder and a readout, so what differs between their curves is the optimizer
@@ -142,7 +152,12 @@ and the model it searches over. `backprop` and `genetic` are the tightest pair: 
 readout, same gate budget, one with a gradient and one without. Every gate can be a NAND, and NANDs
 alone can build any circuit, so the genetic search could in principle find anything backprop finds.
 What sets them apart is the search, not the model. `dfa` and `hebbian` are the other controlled
-pair: identical fixed butterfly wiring, differing only in what teaches the tables.
+pair: identical fixed butterfly wiring, differing only in what teaches the tables. `nherr/ga` and
+`dmuglich/did` are the third: identical genome, identical evaluation budget, one a population with
+crossover and one a single network improved by ranked local moves.
+
+`dmuglich/did` has no `results.json` yet — its points are written and reproducible, but nobody has
+run them through the harness, so it is not on the board.
 
 ## Running the scorer
 
