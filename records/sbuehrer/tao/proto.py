@@ -152,7 +152,7 @@ def _train(a: argparse.Namespace, device: str, data, *, widths: str | None = Non
     print(f"\n{'=' * 78}\n{tag}\n{'=' * 78}", flush=True)
     net = make(b, device)
     opts = dict(signal=a.signal, do_grad=a.do_grad, do_refit=True, revert=not a.no_revert,
-                refit_steps=a.refit_steps, topk=a.topk)
+                refit_steps=a.refit_steps, topk=a.topk, counter_bits=a.counter_bits)
     opts.update(kw)
     acc = fit(net, data, device=device, seed=a.seed, epochs=a.epochs, batch=a.batch, lr=a.lr,
               patience=a.patience, refit_every=a.refit_every, refit_rows=a.refit_rows,
@@ -240,6 +240,9 @@ def main() -> None:
                         "(0 = all). The step size on structure -- small k keeps each move quiet")
     p.add_argument("--refit-steps", type=int, default=1,
                    help="refit rounds per epoch, each on a fresh batch")
+    p.add_argument("--counter-bits", type=int, default=0,
+                   help="width of the integer weight counters (0 = unbounded). The hardware "
+                        "constraint: on an FPGA these are real counters of fixed width")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -274,7 +277,8 @@ def main() -> None:
               patience=a.patience, refit_every=a.refit_every, refit_rows=a.refit_rows,
               refit_frac=a.refit_frac, mtry=a.mtry, chunk=a.chunk, bag=a.bag,
               signal=a.signal, do_grad=a.do_grad, revert=not a.no_revert,
-              refit_steps=a.refit_steps, topk=a.topk, log_every=a.log_every)
+              refit_steps=a.refit_steps, topk=a.topk, counter_bits=a.counter_bits,
+              log_every=a.log_every)
     report(net, acc)
 
     # the harness will demand predict() == the circuit; prove the numpy path agrees now

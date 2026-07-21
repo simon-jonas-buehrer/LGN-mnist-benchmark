@@ -38,17 +38,32 @@ Two facts make the combination work, and both are exact rather than approximate:
   (`_distinct_randint`, and the ancestor mask in `refit_layer`). It costs nothing: a second test
   of a feature already decided on the path is a redundant gate anyway.
 
-  Gradient and tree-refit are one update, split by what each can move.
-  Gradient moves the leaf values (continuous latents, straight-through). It cannot move a split
-  feature -- that is a discrete jump. So the loop alternates: gradient tunes the leaves, and a
-  periodic greedy refit moves the wires, fitting each node to a target read off its OWN gradient,
+  So a derivative here is not an approximation of a counterfactual -- it IS one. Which means the
+  counterfactual can be computed directly, and no derivative need exist at all.
 
-      target[b, m] = 1[g[b, m] < 0]        which way should this bit have gone
-      weight[b, m] = |g[b, m]|             how much did it matter
+The default optimizer therefore has no gradient and no float in it (signal="flip", do_grad=False).
+Forward routes trees; backward counts integers. A node does two things, both local:
 
-  which is a weighted binary classification problem per node -- exactly what the forest record's
-  builder solves, and over binary features a split search is a single GEMM. Here that GEMM is
-  batched over every node and every cell of a layer at once (`refit_layer`), instead of looped.
+  It receives a target from the trees above and rebuilds its whole tree against it. Not just the
+  leaves -- in binary a decision IS the choice of which input bit to test, so changing a decision
+  is rewiring. Every split feature at every level is re-chosen, by the weighted count of which
+  candidate bit best explains the target (`_count`: no ratio, no division, exactly the criterion
+  that minimises the node's weighted 0/1 error, since the leaf rule is majority). `topk` caps how
+  many of the 2^D - 1 decisions may move per step -- a learning rate measured in edits.
+
+  It sends a target down to the bits it reads (`flip_votes`), by asking which of them would fix it
+  if flipped -- answerable exactly, by falling into the sibling subtree and routing on. Votes are
+  signed: -w if the flip would BREAK a node that is currently right. Summed over consumers, the
+  sign becomes the bit's target and the magnitude its weight, and both stay integers.
+
+The pass runs TOP-DOWN and rebuilds each layer before messaging the next (`_flip_targets` is a
+generator for exactly this). A layer's input comes from the layers below it, which have not moved
+yet, so its target stays valid however far it jumps. Computing every layer's target up front and
+rewiring bottom-up instead fits each layer against an input its predecessor has already destroyed:
+survivable when a few nodes move, fatal when they all do.
+
+Both halves have gradient counterparts (signal="grad", do_grad=True) because they are the baseline
+this has to beat, and as of now they still win -- see the README.
 
 Named after Tree Alternating Optimization, the closest existing method: alternate between fitting
 a node's tree and the signal it is fit against.
@@ -193,6 +208,48 @@ def _gini(cnt0: torch.Tensor, cnt1: torch.Tensor, eps: float = 1e-12) -> torch.T
             + cnt1.pow(2).sum(-2) / cnt1.sum(-2).clamp_min(eps))
 
 
+def _fit_width(w: torch.Tensor, bits: int) -> torch.Tensor:
+    """Renormalise integer weights into a `bits`-wide counter (0 = unbounded, i.e. simulation only).
+
+    Weight accumulates as it flows down -- a bit's demand is the sum over every node that reads it
+    -- and real counters are finite. Rather than saturating, which would flatten every loud node to
+    the same value, shift right until the largest fits and then clamp: a priority encoder plus a
+    barrel shift, and the same block-floating-point idea as the bit-plane weights the forest record
+    emits. Keeping this width small is what makes the rule implementable, and it is lossy, so it
+    belongs in the ablations rather than hidden in a default.
+    """
+    if not bits:
+        return w
+    lim = float((1 << bits) - 1)
+    # PER NODE, not over the whole layer: a node may only rescale its own counter, from what it
+    # can see. A layer-wide max would be a global reduction, which is exactly the thing this rule
+    # is not allowed to need -- the only global sum in the design is the readout group popcount,
+    # and that one is part of the circuit anyway.
+    hi = w.max(0, keepdim=True).values.clamp_min(1.0)
+    shift = (hi / lim).clamp_min(1.0).log2().ceil()          # a priority encoder, in floats
+    return torch.div(w, 2 ** shift, rounding_mode="floor").clamp(max=lim)
+
+
+def _count(cnt0: torch.Tensor, cnt1: torch.Tensor) -> torch.Tensor:
+    """Division-free integer split score: |det| of the 2x2 (side x target) contingency table.
+
+        | n0_y0  n0_y1 |
+        | n1_y0  n1_y1 |   ->   |n0_y0 * n1_y1 - n0_y1 * n1_y0|
+
+    Two multiplies and a subtract. No ratio, so no division and no float -- which is the point:
+    the whole rule has to survive on an FPGA, and Gini's `sum_y n_y^2 / sum_y n_y` does not.
+
+    The obvious integer criterion, "weight this split gets right" = max_y n0_y + max_y n1_y, was
+    tried first and is much worse (46.97% against 76.35%). It is exactly aligned with the node's
+    0/1 error, but that makes it a piecewise-constant search surface: a split that purifies a side
+    without flipping its majority label scores identically to one that does nothing, so the argmax
+    picks among ties at random. This is the same reason CART splits on Gini rather than on error
+    rate. The determinant keeps the sensitivity to purity that error rate throws away, while
+    staying in the integers.
+    """
+    return (cnt0[..., 0, :] * cnt1[..., 1, :] - cnt0[..., 1, :] * cnt1[..., 0, :]).abs()
+
+
 def _leaves_and_err(layer: TreeLayer, X: torch.Tensor, feat: torch.Tensor, tgt: torch.Tensor,
                     w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Best leaves for a given wiring, and the weighted target error they achieve, per node.
@@ -226,7 +283,7 @@ def worst_nodes(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.T
 
 def refit_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.Tensor, *,
                 sub: torch.Tensor | None = None, mtry: int = 0, chunk: int = 256,
-                topk: int = 0, accept: bool = True,
+                topk: int = 0, accept: bool = True, criterion: str = "count",
                 gen: torch.Generator | None = None) -> float:
     """Refit the trees in `layer` (or just those in `sub`) to their own weighted binary target.
     Returns the fraction of candidate nodes whose new tree was kept.
@@ -280,7 +337,7 @@ def refit_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.T
             cnt1 = (G.t() @ Xc).reshape(Mc, K, 2, -1)          # weight with bit==1, per class
             tot = G.sum(0).reshape(Mc, K, 2, 1)
             cnt0 = tot - cnt1
-            score = _gini(cnt0, cnt1)                          # (Mc, K, F_cand)
+            score = (_count if criterion == "count" else _gini)(cnt0, cnt1)   # (Mc, K, F_cand)
             # a split that sends (almost) nothing one way is not a split
             dead = (cnt0.sum(-2) < 1e-9) | (cnt1.sum(-2) < 1e-9)
 
@@ -596,8 +653,7 @@ def flip_votes(layer: TreeLayer, x: torch.Tensor, tgt: torch.Tensor,
 
 @torch.no_grad()
 def _flip_targets(net: TaoNet, x: torch.Tensor, y: torch.Tensor, bag: float,
-                  gen: torch.Generator, hinge: bool = True
-                  ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+                  gen: torch.Generator, hinge: bool = True, counter_bits: int = 0):
     """The same (input, target, weight) triples `_grad_targets` produces, with no autograd at all.
 
     The readout layer's target is read straight off the label -- a node in class c's group should
@@ -633,7 +689,8 @@ def _flip_targets(net: TaoNet, x: torch.Tensor, y: torch.Tensor, bag: float,
 
     for li in range(len(net.layers) - 1, -1, -1):
         X = acts[li]
-        wf = w / w.mean().clamp_min(1e-30)                          # keep the Gini scale sane
+        w = _fit_width(w, counter_bits)
+        wf = w
         if bag > 0:
             wf = wf * (torch.rand(wf.shape, generator=gen, device=wf.device) < bag).to(X.dtype)
 
@@ -685,11 +742,18 @@ def _loss(net: TaoNet, x: torch.Tensor, y: torch.Tensor) -> float:
     return float(torch.nn.functional.cross_entropy(net(x), y))
 
 
+@torch.no_grad()
+def _miscount(net: TaoNet, x: torch.Tensor, y: torch.Tensor) -> float:
+    """How many of the batch the circuit gets wrong. The integer counterpart of `_loss`, so the
+    fully discrete mode never needs a cross-entropy to decide whether a move helped."""
+    return float((net(x).argmax(1) != y).sum())
+
+
 def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs: int = 60,
         batch: int = 128, lr: float = 0.05, patience: int = 15, refit_every: int = 2,
         refit_rows: int = 2048, refit_frac: float = 0.1, mtry: int = 1024, chunk: int = 256,
         bag: float = 0.7, signal: str = "flip", do_grad: bool = False, do_refit: bool = True,
-        revert: bool = True, refit_steps: int = 1, topk: int = 0,
+        revert: bool = True, refit_steps: int = 1, topk: int = 0, counter_bits: int = 0,
         log_every: int = 1) -> float:
     """Train. Returns the best val accuracy, and leaves `net` holding that state.
 
@@ -714,7 +778,14 @@ def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs:
     """
     if signal not in ("flip", "grad"):
         raise ValueError(f"signal must be 'flip' or 'grad', not {signal!r}")
-    targets_of = _flip_targets if signal == "flip" else _grad_targets
+    targets_of = ((lambda *a: _flip_targets(*a, counter_bits=counter_bits))
+                  if signal == "flip" else _grad_targets)
+    # With signal="flip" and do_grad=False nothing in the loop is continuous: the forward routes
+    # trees, the backward counts integers, the split criterion counts integers, and whether a move
+    # helped is a count of mistakes. Gini and cross-entropy only come back with a gradient.
+    discrete = signal == "flip" and not do_grad
+    criterion = "count" if discrete else "gini"
+    merit = _miscount if discrete else _loss
     torch.manual_seed(seed)
     gen = torch.Generator(device=device).manual_seed(seed + 1)
     x = torch.from_numpy(np.ascontiguousarray(data.train_x)).to(device)
@@ -752,7 +823,7 @@ def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs:
         for _step in range(refit_steps if do_refit and (ep + 1) % refit_every == 0 else 0):
             idx = torch.randperm(x.shape[0], generator=gen, device=device)[:refit_rows]
             rx, ry = x[idx], y[idx]
-            base = _loss(net, rx, ry)
+            base = merit(net, rx, ry)
             note, moved = [], False
             # Every target is computed top-down against the CURRENT structure, before anything
             # moves, so no node fits a signal derived from an already-rebuilt tree.
@@ -765,10 +836,10 @@ def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs:
                 saved = (lay.feat.clone(), lay.leaf.detach().clone())
                 sub = worst_nodes(lay, X, tgt, w, refit_frac)
                 frac = refit_layer(lay, X, tgt, w, sub=sub, mtry=mtry, chunk=chunk,
-                                   topk=topk, gen=gen)
-                after = _loss(net, rx, ry)
+                                   topk=topk, criterion=criterion, gen=gen)
+                after = merit(net, rx, ry)
                 if after < base or not revert:
-                    note.append(f"L{li} {frac * 100:.0f}%/{sub.numel()} {base:.3f}->{after:.3f}")
+                    note.append(f"L{li} {frac * 100:.0f}%/{sub.numel()} {base:.4g}->{after:.4g}")
                     base, moved = after, True
                 else:                                   # outside the trust region: put it back
                     lay.feat.copy_(saved[0])

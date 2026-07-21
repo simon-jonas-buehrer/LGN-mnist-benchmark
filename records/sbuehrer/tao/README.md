@@ -134,6 +134,37 @@ and not just a budget artifact. Three attempts to close it, none of which worked
   settles once trees are good enough. It does not settle: it oscillates in a 33–48% band. It is at
   least no longer catastrophic; see the update-order fix below.
 
+**Toward a rule that fits in binary logic.** The goal is an optimizer implementable on an FPGA:
+no floats, no division, no global reductions. Where the design stands against that:
+
+| operation | in hardware | status |
+|---|---|---|
+| forward | route trees — muxes | already the circuit |
+| split search `Gᵀ @ X` | X is binary, G is one-hot weights → a bank of counters | no multiplier needed; the GEMM is only how a GPU counts fast |
+| split criterion | `_count`, a 2x2 determinant: 2 multiplies, 1 subtract | division-free |
+| readout demand | `1 - (true votes - best rival)` | subtract + clamp |
+| top-k edit choice | compare network over `2^D - 1` counters | fine |
+| weight counters | `--counter-bits`, shift-to-fit **per node** | a layer-wide max would be a global reduction |
+| loss-gated revert | needs a global controller | **not allowed** — use `--no-revert` |
+
+A tree's leaf indicator is a conjunction of literals, so a batch forward is bitwise AND/OR over
+64-sample words (what `mnistbench/netlist.py` already does), and the backward counting is
+`popcount(reach & target & feature)`. Weighted counts stay bitwise by bit-slicing the weight and
+popcounting each plane — the same bit-plane trick `forest` emits in silicon. Split indices are
+integers only because a GPU needs an address; on an FPGA a split feature *is* a mux select.
+
+Two results from making it division-free, both on the fully-local arm (`--no-revert`):
+
+- **Counter width is free.** 8-bit counters and unbounded counters give bit-identical results
+  (46.97% either way). Good news for the hardware target.
+- **The criterion is not.** Gini (float, needs a division) 76.35% → 2x2 determinant (integer)
+  62.83% → "weight this split gets right" (integer) 46.97%. The last one is *exactly* aligned with
+  the node's 0/1 error, which is what makes it bad: a split that purifies a side without flipping
+  its majority label scores identically to one that does nothing, so the search surface is
+  piecewise-constant and the argmax breaks ties at random. This is the same reason CART splits on
+  Gini rather than error rate. The determinant keeps purity-sensitivity while staying integral,
+  and recovers most but not all of the gap. Going division-free currently costs ~14 points.
+
 **Update order is load-bearing.** Handing every layer its target up front and then rewiring
 bottom-up fits each layer against an input its predecessor has already destroyed. Harmless when
 10% of nodes move, fatal when all of them do — that configuration collapsed to chance (~7%).
