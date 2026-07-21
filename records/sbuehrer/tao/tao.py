@@ -193,6 +193,25 @@ def _gini(cnt0: torch.Tensor, cnt1: torch.Tensor, eps: float = 1e-12) -> torch.T
             + cnt1.pow(2).sum(-2) / cnt1.sum(-2).clamp_min(eps))
 
 
+def _leaves_and_err(layer: TreeLayer, X: torch.Tensor, feat: torch.Tensor, tgt: torch.Tensor,
+                    w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Best leaves for a given wiring, and the weighted target error they achieve, per node.
+
+    The rules follow the wiring: for any structure the optimal leaf is the weighted majority of
+    the target in that cell, so a candidate rewiring can always be scored at its own best rules
+    rather than against stale ones.
+    """
+    M = feat.shape[0]
+    cell = layer.cells(X, feat, layer.depth)                       # (B, M)
+    pos = torch.zeros(M, layer.n_leaf, device=X.device, dtype=X.dtype)
+    neg = torch.zeros_like(pos)
+    pos.scatter_add_(1, cell.t(), (w * tgt).t().contiguous())
+    neg.scatter_add_(1, cell.t(), (w * (1 - tgt)).t().contiguous())
+    leafbit = (pos > neg).to(X.dtype)
+    out = leafbit.reshape(-1)[torch.arange(M, device=X.device) * layer.n_leaf + cell]
+    return leafbit, (w * (out - tgt).abs()).sum(0)
+
+
 def worst_nodes(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.Tensor,
                 frac: float) -> torch.Tensor:
     """The `frac` of nodes whose current tree fits its target worst -- the ones with the most to
@@ -207,7 +226,8 @@ def worst_nodes(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.T
 
 def refit_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.Tensor, *,
                 sub: torch.Tensor | None = None, mtry: int = 0, chunk: int = 256,
-                accept: bool = True, gen: torch.Generator | None = None) -> float:
+                topk: int = 0, accept: bool = True,
+                gen: torch.Generator | None = None) -> float:
     """Refit the trees in `layer` (or just those in `sub`) to their own weighted binary target.
     Returns the fraction of candidate nodes whose new tree was kept.
 
@@ -283,20 +303,29 @@ def refit_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, w: torch.T
             slot = c_ar + (K - 1)
             new_feat[m0:m1, slot] = cand[torch.where(alive, best, fallback)]
 
-    # leaves: weighted majority of the target in each leaf cell
-    leaf_cell = layer.cells(X, new_feat, D)                    # (B, M)
-    pos = torch.zeros(M, layer.n_leaf, device=dev, dtype=X.dtype)
-    neg = torch.zeros_like(pos)
-    pos.scatter_add_(1, leaf_cell.t(), (w * tgt).t().contiguous())
-    neg.scatter_add_(1, leaf_cell.t(), (w * (1 - tgt)).t().contiguous())
-    new_leafbit = (pos > neg).to(X.dtype)
+    # ---- step size, measured in EDITS ---------------------------------------------------
+    # `new_feat` is the node's best config given its error signal. Jumping straight there is a
+    # big move; taking only the `topk` most valuable rewirings is the same idea with a learning
+    # rate on it. A node has just 2^D - 1 slots, so every single-slot change can be scored
+    # EXACTLY -- rebuild the leaves for that one edit and measure the node's weighted target
+    # error -- rather than ranked by a proxy. The decision rules always follow the wiring: leaves
+    # are refit to whatever structure survives.
+    old_feat = layer.feat[sub]
+    _, err_old = _leaves_and_err(layer, X, old_feat, tgt, w)
+    if topk and topk < layer.n_slots:
+        gain = torch.empty(M, layer.n_slots, device=dev, dtype=X.dtype)
+        for s in range(layer.n_slots):
+            trial = old_feat.clone()
+            trial[:, s] = new_feat[:, s]
+            _, e = _leaves_and_err(layer, X, trial, tgt, w)
+            gain[:, s] = err_old - e
+        take = gain.topk(topk, dim=1).indices                  # the k edits worth most
+        merged = old_feat.clone()
+        merged.scatter_(1, take, new_feat.gather(1, take))
+        new_feat = merged
+    new_leafbit, err_new = _leaves_and_err(layer, X, new_feat, tgt, w)
 
-    if accept:
-        old = layer.hard_out(X, layer.feat[sub], hard_bit(layer.leaf[sub]))
-        new = layer.hard_out(X, new_feat, new_leafbit)
-        keep = (w * (new - tgt).abs()).sum(0) < (w * (old - tgt).abs()).sum(0)
-    else:
-        keep = torch.ones(M, dtype=torch.bool, device=dev)
+    keep = err_new < err_old if accept else torch.ones(M, dtype=torch.bool, device=dev)
 
     idx = sub[keep]
     layer.feat[idx] = new_feat[keep]
@@ -514,9 +543,122 @@ def dichotomy_init(net: TaoNet, x: torch.Tensor, y: torch.Tensor, *, mtry: int, 
         del frac
 
 
+@torch.no_grad()
+def flip_votes(layer: TreeLayer, x: torch.Tensor, tgt: torch.Tensor,
+               w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Discrete credit assignment through one layer. No derivative anywhere.
+
+    A node that is not producing its target asks: which of the bits I read would fix me? On a
+    binary tree over binary inputs that question has an EXACT answer -- flip the bit, fall into
+    the sibling subtree, and route the rest of the way down with the real bits. So instead of a
+    derivative we get a counterfactual:
+
+        vote(m -> f) = w_m * ( [output with f flipped hits t_m] - [output now hits t_m] )
+
+    which is +w_m if flipping f would fix node m, -w_m if it would BREAK a node that is currently
+    right, and 0 if it changes nothing. The negative votes matter as much as the positive ones:
+    without them every bit that anyone wants flipped gets flipped, and the net oscillates.
+
+    Its support is the same set of bits the multilinear gradient touches -- the on-path ones whose
+    flip changes the output -- so this is a drop-in replacement for the gradient message. What it
+    does NOT inherit is the linearisation: the gradient composes first-order approximations across
+    layers and through the softmax, while this is exact for the one-bit question it asks.
+
+    Returns (net demand on each input bit, this layer's current output).
+    """
+    dev, B, M = x.device, x.shape[0], layer.width
+    feat, leafbit = layer.feat, layer.leafbit()
+    bs = torch.arange(M, device=dev) * layer.n_slots
+    bl = torch.arange(M, device=dev) * layer.n_leaf
+    flat = feat.reshape(-1)
+
+    cells, feats, bits = [], [], []
+    cell = torch.zeros(B, M, dtype=torch.long, device=dev)
+    for d in range(layer.depth):
+        fi = flat[bs + ((1 << d) - 1) + cell]
+        bit = torch.gather(x, 1, fi).long()
+        cells.append(cell)
+        feats.append(fi)
+        bits.append(bit)
+        cell = cell * 2 + bit
+    out = leafbit.reshape(-1)[bl + cell]
+    hit = (out == tgt).to(x.dtype)
+
+    votes = torch.zeros_like(x)
+    for d in range(layer.depth):
+        lc = cells[d] * 2 + (1 - bits[d])            # the sibling: where flipping bit d lands you
+        for dd in range(d + 1, layer.depth):         # then route the rest of the way as usual
+            lc = lc * 2 + torch.gather(x, 1, flat[bs + ((1 << dd) - 1) + lc]).long()
+        alt = leafbit.reshape(-1)[bl + lc]
+        votes.scatter_add_(1, feats[d], w * ((alt == tgt).to(x.dtype) - hit))
+    return votes, out
+
+
+@torch.no_grad()
+def _flip_targets(net: TaoNet, x: torch.Tensor, y: torch.Tensor, bag: float,
+                  gen: torch.Generator, hinge: bool = True
+                  ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """The same (input, target, weight) triples `_grad_targets` produces, with no autograd at all.
+
+    The readout layer's target is read straight off the label -- a node in class c's group should
+    fire exactly when c is the answer -- and every layer below gets its target from the votes the
+    layer above cast on its bits. A bit wanted flipped on balance is asked to flip; how loudly it
+    was asked becomes its weight. The signal is computed top-down against the CURRENT structure,
+    before anything is rebuilt, so no node is fitting a target derived from an already-moved tree.
+
+    `hinge` scales each sample's readout demand by how close the circuit is to getting it wrong:
+
+        demand = max(0, 1 - (votes for the true class - votes for the best rival))
+
+    so a sample already won by a clear margin asks for nothing, a tie asks with weight 1, and a
+    loss asks in proportion to how badly it lost. This is what |dL/d.| does for the gradient
+    version -- confidently-correct samples contribute almost nothing -- except it is computed from
+    the readout's INTEGER vote counts, so it stays derivative-free. Without it every sample shouts
+    equally loudly and the vote is dominated by demands that did not need satisfying.
+    """
+    acts = net.activations(x)
+    dt = acts[0].dtype                     # the bit dtype -- `x` itself is still uint8 pixels
+    g = net.widths[-1] // N_CLASSES
+    grp = torch.arange(net.widths[-1], device=x.device) // g
+    tgt = (grp[None, :] == y[:, None]).to(dt)                      # (B, width_last)
+
+    if hinge:
+        cnt = acts[-1].reshape(len(y), N_CLASSES, g).sum(-1)       # integer votes per class
+        mask = torch.zeros_like(cnt, dtype=torch.bool).scatter_(1, y[:, None], True)
+        true = cnt.gather(1, y[:, None]).squeeze(1)
+        rival = cnt.masked_fill(mask, float("-inf")).max(1).values
+        w = (1.0 - (true - rival)).clamp_min(0.0)[:, None].expand_as(tgt).contiguous()
+    else:
+        w = torch.ones_like(tgt)
+
+    for li in range(len(net.layers) - 1, -1, -1):
+        X = acts[li]
+        wf = w / w.mean().clamp_min(1e-30)                          # keep the Gini scale sane
+        if bag > 0:
+            wf = wf * (torch.rand(wf.shape, generator=gen, device=wf.device) < bag).to(X.dtype)
+
+        # TOP-DOWN, and the caller updates layer li while we are suspended here. That ordering is
+        # what keeps the pass self-consistent: layer li's input X is produced by the layers BELOW
+        # it, which have not been touched yet, so X is still valid however much li moves. Handing
+        # every layer its target up front and then rewiring bottom-up fits each layer against an
+        # input its predecessor has already destroyed -- survivable when a few nodes move, fatal
+        # when they all do.
+        yield li, X, tgt, wf
+
+        if li:                          # message down, cast by the layer as it now stands
+            votes, _ = flip_votes(net.layers[li], X, tgt, w)
+            tgt = torch.where(votes > 0, 1 - X, X)
+            w = votes.abs()
+
+
 def _grad_targets(net: TaoNet, x: torch.Tensor, y: torch.Tensor, bag: float,
-                  gen: torch.Generator) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """One backward pass -> (input bits, target, weight) per layer.
+                  gen: torch.Generator):
+    """One backward pass -> (layer index, input bits, target, weight), yielded top-down.
+
+    Same interface as `_flip_targets` so `fit` does not care which it got, and top-down for the
+    same reason -- see the note there. A gradient pass is inherently simultaneous, so unlike the
+    flip pass these targets are all computed at the old parameters; only the update order is
+    staged.
 
     target = 1[g < 0]: g is the exact change in the loss from flipping this bit (the network is
     multilinear in the hidden bits, so the only approximation is the softmax at the very end), so
@@ -529,15 +671,13 @@ def _grad_targets(net: TaoNet, x: torch.Tensor, y: torch.Tensor, bag: float,
     loss = torch.nn.functional.cross_entropy(net.head(acts[-1]), y)
     net.zero_grad(set_to_none=True)
     loss.backward()
-    out = []
-    for li, lay in enumerate(net.layers):
+    for li in range(len(net.layers) - 1, -1, -1):
         g = acts[li + 1].grad
         w = g.abs()
         w = w / w.mean().clamp_min(1e-30)                      # keep the Gini scale sane
         if bag > 0:
             w = w * (torch.rand(w.shape, generator=gen, device=w.device) < bag).float()
-        out.append((acts[li].detach(), (g < 0).float(), w.detach()))
-    return out
+        yield li, acts[li].detach(), (g < 0).float(), w.detach()
 
 
 @torch.no_grad()
@@ -548,13 +688,33 @@ def _loss(net: TaoNet, x: torch.Tensor, y: torch.Tensor) -> float:
 def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs: int = 60,
         batch: int = 128, lr: float = 0.05, patience: int = 15, refit_every: int = 2,
         refit_rows: int = 2048, refit_frac: float = 0.1, mtry: int = 1024, chunk: int = 256,
-        bag: float = 0.7, do_grad: bool = True, do_refit: bool = True,
+        bag: float = 0.7, signal: str = "flip", do_grad: bool = False, do_refit: bool = True,
+        revert: bool = True, refit_steps: int = 1, topk: int = 0,
         log_every: int = 1) -> float:
     """Train. Returns the best val accuracy, and leaves `net` holding that state.
 
-    do_grad / do_refit exist for the ablation: the alternation has to beat both halves of itself
-    or it is not earning its complexity.
+    `signal` is where a node's target comes from:
+      "flip"  exact discrete counterfactual votes from the trees above (`_flip_targets`). No
+              autograd, no loss surface -- a node is told what it should have output and by how
+              loudly it was asked, and everything it does is a function of that message.
+      "grad"  the same triples read off a backward pass (`_grad_targets`).
+
+    do_grad additionally runs Adam on the leaf latents. With signal="flip" and do_grad=False the
+    optimizer touches no derivative anywhere: the whole thing is messages down and rebuilt trees.
+
+    Two independent step sizes on the structural move, because a node's best config given its
+    error signal is a big jump and the signal is only a batch estimate:
+      refit_frac  what fraction of a layer's NODES may move this round (1.0 = all of them)
+      topk        how many of a node's 2^D - 1 decisions may be rewired (0 = all of them)
+    topk is the finer of the two -- every node improves a little, instead of a few nodes jumping
+    all the way -- and is the one that behaves like a learning rate.
+
+    signal / do_grad / do_refit / revert exist for the ablations -- each part has to beat the
+    variant without it or it is not earning its complexity.
     """
+    if signal not in ("flip", "grad"):
+        raise ValueError(f"signal must be 'flip' or 'grad', not {signal!r}")
+    targets_of = _flip_targets if signal == "flip" else _grad_targets
     torch.manual_seed(seed)
     gen = torch.Generator(device=device).manual_seed(seed + 1)
     x = torch.from_numpy(np.ascontiguousarray(data.train_x)).to(device)
@@ -589,21 +749,25 @@ def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs:
                 loss.backward()
                 opt.step()
 
-        if do_refit and (ep + 1) % refit_every == 0:
+        for _step in range(refit_steps if do_refit and (ep + 1) % refit_every == 0 else 0):
             idx = torch.randperm(x.shape[0], generator=gen, device=device)[:refit_rows]
             rx, ry = x[idx], y[idx]
             base = _loss(net, rx, ry)
             note, moved = [], False
-            # One layer at a time, each gated on the TRUE loss. The per-node target is only a
-            # linearisation of that loss, so "better on the target" has to be checked against the
-            # thing we actually minimise -- otherwise the refit reliably undoes the gradient.
-            for li, (X, tgt, w) in enumerate(_grad_targets(net, rx, ry, bag, gen)):
+            # Every target is computed top-down against the CURRENT structure, before anything
+            # moves, so no node fits a signal derived from an already-rebuilt tree.
+            #
+            # `revert` then gates each layer on the true loss. That is a global check and the only
+            # non-local thing here, so it is a knob: the "flip" signal is exact for the question it
+            # asks, which is what the fully-local variant is testing.
+            for li, X, tgt, w in targets_of(net, rx, ry, bag, gen):
                 lay = net.layers[li]
                 saved = (lay.feat.clone(), lay.leaf.detach().clone())
                 sub = worst_nodes(lay, X, tgt, w, refit_frac)
-                frac = refit_layer(lay, X, tgt, w, sub=sub, mtry=mtry, chunk=chunk, gen=gen)
+                frac = refit_layer(lay, X, tgt, w, sub=sub, mtry=mtry, chunk=chunk,
+                                   topk=topk, gen=gen)
                 after = _loss(net, rx, ry)
-                if after < base:
+                if after < base or not revert:
                     note.append(f"L{li} {frac * 100:.0f}%/{sub.numel()} {base:.3f}->{after:.3f}")
                     base, moved = after, True
                 else:                                   # outside the trust region: put it back

@@ -3,6 +3,7 @@
     python records/sbuehrer/tao/proto.py --selfcheck
     python records/sbuehrer/tao/proto.py --gradcheck
     python records/sbuehrer/tao/proto.py --widths 1024,512,320 --bits 3 --depth 3
+    python records/sbuehrer/tao/proto.py --signal-ablate
     python records/sbuehrer/tao/proto.py --ablate
     python records/sbuehrer/tao/proto.py --depth-ablate
 
@@ -144,24 +145,45 @@ def gradcheck(a: argparse.Namespace, device: str) -> None:
 # Check 4: is the alternation earning its complexity?  Check 5: is depth doing anything?
 # ==========================================================================================
 def _train(a: argparse.Namespace, device: str, data, *, widths: str | None = None,
-           do_grad: bool = True, do_refit: bool = True, tag: str = "") -> tuple[float, dict]:
+           tag: str = "", **kw) -> tuple[float, dict]:
     b = argparse.Namespace(**vars(a))
     if widths:
         b.widths = widths
     print(f"\n{'=' * 78}\n{tag}\n{'=' * 78}", flush=True)
     net = make(b, device)
+    opts = dict(signal=a.signal, do_grad=a.do_grad, do_refit=True, revert=not a.no_revert,
+                refit_steps=a.refit_steps, topk=a.topk)
+    opts.update(kw)
     acc = fit(net, data, device=device, seed=a.seed, epochs=a.epochs, batch=a.batch, lr=a.lr,
               patience=a.patience, refit_every=a.refit_every, refit_rows=a.refit_rows,
               refit_frac=a.refit_frac, mtry=a.mtry, chunk=a.chunk, bag=a.bag,
-              do_grad=do_grad, do_refit=do_refit, log_every=a.log_every)
+              log_every=a.log_every, **opts)
     return acc, report(net, acc, tag)
+
+
+def signal_ablate(a: argparse.Namespace, device: str) -> None:
+    """Does a node need a real gradient, or is an exact discrete message from the trees above
+    enough? The last two arms touch no derivative anywhere: messages down, trees rebuilt, and
+    nothing else."""
+    data = load()
+    runs = [
+        ("grad signal + leaf gradient", dict(signal="grad", do_grad=True)),
+        ("flip signal + leaf gradient", dict(signal="flip", do_grad=True)),
+        ("flip signal only -- NO derivative anywhere", dict(signal="flip", do_grad=False)),
+        ("flip signal only, no loss-gated revert (fully local)",
+         dict(signal="flip", do_grad=False, revert=False)),
+    ]
+    out = [(tag, *_train(a, device, data, tag=tag, **kw)) for tag, kw in runs]
+    print(f"\n{'=' * 78}\nsignal ablation: is a discrete message enough?\n{'=' * 78}")
+    for tag, acc, e in out:
+        print(f"  {acc:6.2f}%  ~{e['ge_est']:>8,} GE   {tag}")
 
 
 def ablate(a: argparse.Namespace, device: str) -> None:
     data = load()
     runs = [
-        ("full: dichotomy init + gradient + refit", dict(do_grad=True, do_refit=True)),
-        ("gradient only (structure frozen after init)", dict(do_grad=True, do_refit=False)),
+        ("full: init + refit + leaf gradient", dict(do_grad=True, do_refit=True)),
+        ("leaf gradient only (structure frozen after init)", dict(do_grad=True, do_refit=False)),
         ("refit only (no gradient on the leaves)", dict(do_grad=False, do_refit=True)),
     ]
     out = [(tag, *_train(a, device, data, tag=tag, **kw)) for tag, kw in runs]
@@ -206,12 +228,26 @@ def main() -> None:
     p.add_argument("--mtry", type=int, default=1024, help="candidate features per node-chunk, 0=all")
     p.add_argument("--chunk", type=int, default=256, help="nodes per refit GEMM")
     p.add_argument("--bag", type=float, default=0.7, help="per-node weight bagging rate, 0=off")
+    p.add_argument("--signal", default="flip", choices=("flip", "grad"),
+                   help="where a node's target comes from: exact discrete counterfactual votes "
+                        "from the trees above (flip), or a backward pass (grad)")
+    p.add_argument("--do-grad", action="store_true",
+                   help="also run Adam on the leaf latents (off = no derivative anywhere)")
+    p.add_argument("--no-revert", action="store_true",
+                   help="skip the loss-gated revert, making the update purely local")
+    p.add_argument("--topk", type=int, default=0,
+                   help="how many of a node's 2^depth-1 decisions may be rewired per step "
+                        "(0 = all). The step size on structure -- small k keeps each move quiet")
+    p.add_argument("--refit-steps", type=int, default=1,
+                   help="refit rounds per epoch, each on a fresh batch")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--selfcheck", action="store_true", help="multilinear forward == tree routing")
     p.add_argument("--gradcheck", action="store_true", help="grad == finite difference, on-path")
     p.add_argument("--ablate", action="store_true", help="full vs gradient-only vs refit-only")
+    p.add_argument("--signal-ablate", action="store_true",
+                   help="gradient signal vs discrete flip votes vs fully-local flip votes")
     p.add_argument("--depth-ablate", action="store_true", help="deep stack vs one flat layer")
     a = p.parse_args()
 
@@ -227,6 +263,8 @@ def main() -> None:
         return gradcheck(a, dev)
     if a.ablate:
         return ablate(a, dev)
+    if a.signal_ablate:
+        return signal_ablate(a, dev)
     if a.depth_ablate:
         return depth_ablate(a, dev)
 
@@ -235,7 +273,8 @@ def main() -> None:
     acc = fit(net, data, device=dev, seed=a.seed, epochs=a.epochs, batch=a.batch, lr=a.lr,
               patience=a.patience, refit_every=a.refit_every, refit_rows=a.refit_rows,
               refit_frac=a.refit_frac, mtry=a.mtry, chunk=a.chunk, bag=a.bag,
-              log_every=a.log_every)
+              signal=a.signal, do_grad=a.do_grad, revert=not a.no_revert,
+              refit_steps=a.refit_steps, topk=a.topk, log_every=a.log_every)
     report(net, acc)
 
     # the harness will demand predict() == the circuit; prove the numpy path agrees now
