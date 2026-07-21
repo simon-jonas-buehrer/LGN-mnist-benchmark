@@ -71,6 +71,7 @@ What has and has not moved that ceiling, in order:
 | change | result |
 |---|---|
 | per-node row bagging restored | 63.00% -> **70.33%** |
+| full candidate search (`mtry 0`) | 70.33% -> **72.17%** |
 | batch 512 -> 2048 -> 8192 | 64.70 / 63.00 / 64.00 -- no change |
 | slot picker: greedy / cycle / random | 70.33 / 69.97 / 69.35 -- no change |
 | 30 -> 300 epochs (before bagging) | none; best stayed at epoch 21 |

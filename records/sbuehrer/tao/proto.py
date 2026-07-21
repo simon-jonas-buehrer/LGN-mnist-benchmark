@@ -145,7 +145,10 @@ def main() -> None:
                    help="which decision a node changes per step: round-robin by (node + step) "
                         "mod slots, a random slot, or the slot whose change helps most (greedy, "
                         "and biased toward the root)")
-    p.add_argument("--mtry", type=int, default=1024, help="candidate bits per node-chunk, 0=all")
+    p.add_argument("--mtry", type=int, default=0,
+                   help="candidate bits per node-chunk, 0 = all of them (the default: a node may "
+                        "rewire any decision to ANY bit of the previous layer). Subsetting is a "
+                        "speed shortcut and costs accuracy -- 70.33%% at 256 vs 72.17%% at 0")
     p.add_argument("--chunk", type=int, default=256, help="nodes per counting pass")
     p.add_argument("--patience", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
