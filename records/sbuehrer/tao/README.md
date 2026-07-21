@@ -1,242 +1,105 @@
-# tao — a deep network of decision trees, each rebuilt from the signal above it
+# tao — a binary network of decision trees, trained by a local binary error signal
 
-**Status: phase-1 prototype. Not a submission yet.** There is no `submission.py`, no Verilog and
-no measured point on the leaderboard. This directory answers one question first — *does it
-learn?* — because the architecture is worth building only if it does.
+**Status: phase-1 prototype. Not a submission yet.** No `submission.py`, no Verilog, no measured
+point. This directory answers *does it learn?* first.
 
 ## The idea
 
-`forest` owns the frontier but is shallow: every tree reads the raw thermometer bits, so nothing
-composes. `backprop` is deep but its wiring search is crippled — each gate input picks among **8
-randomly drawn candidate signals**, out of thousands.
+`forest` owns the frontier but is shallow — every tree reads the raw thermometer bits, so nothing
+composes. `backprop` is deep but its wiring search picks among **8 randomly drawn candidates** per
+gate input, out of thousands.
 
-So: a layered network where every node is a small decision tree with a **full receptive field over
-the previous layer**, and the wiring is chosen by information gain over *all* candidate bits.
+So: a layered net where every node is a small decision tree with a **full receptive field over the
+previous layer**, and the wiring is chosen by looking at every candidate bit. The tree builder *is*
+the wiring optimizer.
 
 ```
 thermometer encoder -> M0 tree-nodes -> M1 tree-nodes -> ... -> popcount -> argmax
 ```
 
-The tree builder *is* the wiring optimizer. That is the claim, and it is a controlled comparison
-against `backprop` — same depth, same encoder, same readout, same exact-hard binary forward, and
-the only difference is what chooses the wires.
+**Nothing here is continuous.** No gradient, no float, no loss surface — the goal is a learning
+rule that could run in binary logic on an FPGA, not only a model that ends up as one.
 
-Nothing about this needs a gradient in the classical sense. A node gets a signal from the trees
-above, passes a signal down to the bits it reads, and rebuilds itself. That is the whole optimizer,
-and the default (`--signal flip`) touches no derivative anywhere.
+## The rule
 
-## Why a tree's messages are exact
+| | |
+|---|---|
+| **forward** | route each sample through each tree — the same work the emitted circuit does |
+| **error** | at the readout, a node in class `c`'s group should fire exactly when `c` is the answer. Its error is one bit: `out XOR should` |
+| **backward** | a node asks which bit it reads would fix it. **Exact**: flip the bit, fall into the sibling subtree, route on, read the leaf. `vote = [flipped hits target] − [now hits target]` ∈ {+1, 0, −1} |
+| **update** | a node compares its error against **all** candidate bits over the batch and changes **one** decision — which input it tests, and hence its rule — or the best `topk` of its `2^D − 1` |
 
-The reason a discrete message suffices is a property of the model, so it is worth stating first.
-A tree's output is multilinear in the bits it reads, `out(x) = Σ_l v_l · Π_path lit(x_f)`, and on
-binary inputs the derivative of a multilinear function is a finite difference with no truncation
-error at all:
+No derivative exists or is needed. A tree's output is multilinear in the bits it reads, so on
+binary inputs a derivative *is* a counterfactual — which means the counterfactual can just be
+computed. Only bits on the path taken can score anything, so the message is sparse for free.
 
-```
-d out / d x_f  =  out(x_f = 1) - out(x_f = 0)
-flipping bit f moves the output by exactly (1 - 2*x_f) * d out / d x_f
-```
+Negative votes matter as much as positive ones: without them, every bit anyone wants flipped gets
+flipped and the net oscillates. Signals on the wire are bits; the sum over a bit's consumers is a
+counter living at the node that drives it — the only place it could live in hardware.
 
-Every off-path product contains a zero factor, so **only the ≤D features on the path actually
-taken carry any signal at all**. "Send signal only to the inputs this node's tree used" is not
-engineered — it falls out of the algebra. `backprop`'s `LutLayer` already uses the 2-input case of
-the same form.
+**Order is load-bearing.** `targets()` is a generator: the caller rewires each layer while the pass
+is suspended. A layer's input comes from the layers *below*, untouched, so its target stays valid
+however far it moves. Handing every layer a target up front and rewiring bottom-up instead fits
+each layer against an input its predecessor already destroyed — survivable when a few nodes move,
+**fatal when they all do** (that collapsed to chance).
 
-So a derivative here is not an approximation of a counterfactual — it *is* one. Which means the
-counterfactual can be computed directly, discretely, without ever building a derivative, and that
-is what the default optimizer does.
+## Implementable in logic
 
-That identity has one precondition, which `--gradcheck` found: **no root-to-leaf path may test the
-same feature twice.** A repeat puts `x_f·x_f` in the product, and `x² = x` is true as a function on
-{0,1} but false as a derivative — a contradictory repeat is identically zero yet carries gradient
-`1 − 2x_f`, pointing somewhere the output cannot go. The invariant is enforced structurally in both
-the init and the refit. It costs nothing: re-testing a feature the path already decided is a
-redundant gate anyway.
+| operation | in hardware |
+|---|---|
+| forward | route trees — muxes. A leaf indicator is a conjunction of literals, so a batch is bitwise AND/OR over 64-sample words (as `mnistbench/netlist.py` already simulates netlists) |
+| candidate search | X is binary and the scatter matrix one-hot, so the "GEMM" is a **bank of counters** — no multiplier. It is written as a matmul because that is how a GPU counts a bitpacked batch fast |
+| split score | `_score`: a 2×2 determinant — two multiplies, one subtract, **no division** |
+| split indices | only a GPU needs an address; on an FPGA a split feature *is* a mux select |
+| update | a worker visits a node, reads its error bits and candidate inputs, rewrites one decision |
 
-## The update rule: messages down, whole trees rebuilt
+Division-free cost this, measured before the rewrite: Gini (float) 76.35% → determinant (integer)
+62.83% → "how many samples does this split get right" (integer) 46.97%. The last is *exactly*
+aligned with the node's 0/1 error, which is what makes it bad — a split that purifies a side
+without flipping its majority label scores identically to one that does nothing, so the surface is
+piecewise-constant and the argmax breaks ties at random. Same reason CART splits on Gini rather
+than error rate. Counter width, separately, is **free**: 8-bit and unbounded were bit-identical.
 
-A node does exactly two things, and both are local. It receives a signal from the trees above
-saying what it should have output and how much that mattered; it passes a signal down to the bits
-it reads; and then it **redesigns its entire tree** against the signal it got. Not just the leaves
-— in binary, a decision *is* the choice of which input bit to test, so changing a decision is
-rewiring. Every split feature at every level is re-chosen.
+## Where it stands
 
-Crucially the downward message does not need a derivative. A node that is not producing its target
-asks: *which of the bits I read would fix me?* On a binary tree over binary inputs that has an
-**exact** answer — flip the bit, fall into the sibling subtree, route the rest of the way down with
-the real bits, read the leaf. So:
+`--widths 512,320 --bits 3 --mtry 256`, depth 2, topk 1, 30 epochs, one seed, CPU:
 
-```
-vote(m -> f) = w_m * ( [output with f flipped hits t_m] - [output now hits t_m] )
-```
+**64.70% val @ ~3,446 estimated GE.** It learns, then plateaus around 63–65%.
 
-`+w_m` if flipping `f` would fix node `m`, `−w_m` if it would **break** a node that is currently
-right, `0` if it changes nothing. The negative votes matter as much as the positive: without them
-every bit anyone wants flipped gets flipped, and the net oscillates. A bit's votes are summed
-across all its consumers; wanted-flipped on balance becomes its target, and how loudly it was asked
-becomes its weight. That is the same `(target, weight)` pair a gradient would have produced, so the
-node's own update is unchanged: a weighted binary classification problem, which is exactly what
-`forest`'s builder solves, batched here over every node and cell of a layer into one GEMM per
-level.
+Two things that plateau points at, both concrete:
 
-The readout layer's target comes straight off the label — a node in class `c`'s group should fire
-exactly when `c` is the answer. Nothing else needs a loss function.
+- **Only 12–15% of nodes move per step.** Most nodes propose a change and reject it, so the search
+  is finding few improvements — the update rule, not the step size, is the limiter.
+- **The readout now dominates the area.** At depth 2 the trees cost ~1,276 GE and the popcount head
+  costs ~1,874. Widening the last layer is the most expensive thing you can do; a taller stack with
+  a *narrow* final layer is the cheap direction. `--stack-ablate` tests exactly that.
 
-**The discrete message is exact where a gradient is approximate.** Backprop composes first-order
-approximations across layers and through the softmax; this composes exact single-bit counterfactuals.
-Its support is identical — the on-path bits whose flip changes the output — so it drops into the
-same slot, which is what makes `--signal-ablate` a clean comparison. `signal="flip", do_grad=False`
-touches no derivative anywhere.
+Tree depth is fixed at 2 from here: at matched node count accuracy went 81.05 → 86.12 → 88.40 for
+depth 2 → 3 → 4, so +5.1 then +2.3 points, against a steady ~1.9× area each step. Capacity comes
+from more nodes instead.
 
-The optional gradient path (`--signal grad`, `--do-grad`) remains, because leaf values *are*
-continuous latents that a gradient can tune, and it is the baseline the discrete rule has to beat.
-
-## What phase 1 found
-
-**The refit needs a trust region, and an honest acceptance test.** The first working version
-rebuilt every node whose local target error improved. It was actively destructive: gradient alone
-reached 79% in one epoch, and every refit round cratered it to ~40%, with the next epoch clawing
-back to ~70%. Two causes, both real:
-
-- the target is a *linearisation* of the loss around the current bits, so a tree that perfectly
-  matches `sign(−g)` is an enormous jump into territory where `g` means nothing;
-- rebuilding a node resets its leaves to the target's weighted majority, discarding what the
-  gradient had learned — and ~65% of nodes were being rebuilt every round.
-
-Both are fixed by making the structural step small and checking it against the thing actually being
-minimised: each round rebuilds only the worst `refit_frac` of nodes (default 10%), one layer at a
-time, and a layer is **reverted outright if the true loss on the refit batch got worse**. With
-that, loss falls monotonically at every accepted step and the revert fires when it should.
-
-**The discrete message learns, but does not yet match a gradient.** `--signal-ablate`, same net,
-60 epochs, one seed:
-
-| arm | val acc | est. GE | wall | best epoch |
-|---|---|---|---|---|
-| grad signal + leaf gradient | **86.92%** | ~3,214 | 277s | 44/60 |
-| flip signal + leaf gradient | 81.82% | ~3,416 | 126s | 9/60 |
-| flip only — no derivative anywhere | 78.45% | ~4,259 | **33s** | 57/60 |
-| flip only, fully local (no revert) | 76.35% | ~4,220 | 32s | 42/60 |
-
-Worse on both axes, by 5–8 points. The discrete rule is ~8x cheaper per epoch, so equal epochs is
-not equal compute — but given 400 epochs it early-stopped at 94 with 76.80%, so the gap is real
-and not just a budget artifact. Three attempts to close it, none of which worked:
-
-- *Hinge weighting at the readout.* Uniform `w = 1` lets confidently-correct samples shout as
-  loudly as wrong ones, where `|dL/d.|` would have silenced them. Weighting each sample's demand
-  by `max(0, 1 - (true votes - best rival votes))` — integer, derivative-free — improved the early
-  curve (73.8% vs 71.2% at epoch 6) but not the converged number.
-- *Edit-rate step size* (`--topk`): a node computes its best config but applies only its `k` most
-  valuable rewirings, each scored exactly (a node has only `2^D - 1` slots, so every single-slot
-  change can be evaluated at its own best leaves rather than ranked by a proxy). `topk=1` reached
-  67.23% and plateaued — slower, not steadier.
-- *No damping at all* — every node rebuilding every batch, on the theory that it is noisy early and
-  settles once trees are good enough. It does not settle: it oscillates in a 33–48% band. It is at
-  least no longer catastrophic; see the update-order fix below.
-
-**Toward a rule that fits in binary logic.** The goal is an optimizer implementable on an FPGA:
-no floats, no division, no global reductions. Where the design stands against that:
-
-| operation | in hardware | status |
-|---|---|---|
-| forward | route trees — muxes | already the circuit |
-| split search `Gᵀ @ X` | X is binary, G is one-hot weights → a bank of counters | no multiplier needed; the GEMM is only how a GPU counts fast |
-| split criterion | `_count`, a 2x2 determinant: 2 multiplies, 1 subtract | division-free |
-| readout demand | `1 - (true votes - best rival)` | subtract + clamp |
-| top-k edit choice | compare network over `2^D - 1` counters | fine |
-| weight counters | `--counter-bits`, shift-to-fit **per node** | a layer-wide max would be a global reduction |
-| loss-gated revert | needs a global controller | **not allowed** — use `--no-revert` |
-
-A tree's leaf indicator is a conjunction of literals, so a batch forward is bitwise AND/OR over
-64-sample words (what `mnistbench/netlist.py` already does), and the backward counting is
-`popcount(reach & target & feature)`. Weighted counts stay bitwise by bit-slicing the weight and
-popcounting each plane — the same bit-plane trick `forest` emits in silicon. Split indices are
-integers only because a GPU needs an address; on an FPGA a split feature *is* a mux select.
-
-Two results from making it division-free, both on the fully-local arm (`--no-revert`):
-
-- **Counter width is free.** 8-bit counters and unbounded counters give bit-identical results
-  (46.97% either way). Good news for the hardware target.
-- **The criterion is not.** Gini (float, needs a division) 76.35% → 2x2 determinant (integer)
-  62.83% → "weight this split gets right" (integer) 46.97%. The last one is *exactly* aligned with
-  the node's 0/1 error, which is what makes it bad: a split that purifies a side without flipping
-  its majority label scores identically to one that does nothing, so the search surface is
-  piecewise-constant and the argmax breaks ties at random. This is the same reason CART splits on
-  Gini rather than error rate. The determinant keeps purity-sensitivity while staying integral,
-  and recovers most but not all of the gap. Going division-free currently costs ~14 points.
-
-**Update order is load-bearing.** Handing every layer its target up front and then rewiring
-bottom-up fits each layer against an input its predecessor has already destroyed. Harmless when
-10% of nodes move, fatal when all of them do — that configuration collapsed to chance (~7%).
-Updating **top-down** is self-consistent, because a layer's input comes from the layers below it,
-which have not moved yet; the same run then reaches 48%. `_flip_targets` is a generator for this
-reason: the caller rewires a layer while the pass is suspended, so the message sent downward is
-cast by the layer as it now stands.
-
-**The alternation earns its complexity.** `--ablate` at a deliberately tiny 416-node net
-(`--widths 256,160 --bits 3 --mtry 256`, 40 epochs, one seed):
-
-| | val acc | est. GE |
-|---|---|---|
-| **full: dichotomy init + gradient + refit** | **85.98%** | ~3,383 |
-| gradient only (structure frozen after init) | 80.67% | ~3,386 |
-| refit only (no gradient on the leaves) | 83.12% | ~4,475 |
-
-+5.3 points over gradient-only at *identical* area, and +2.9 over refit-only at 25% *less* area —
-the refit-only net spends more silicon because nothing ever collapses its trees toward constants.
-Both halves are needed, which is the result this prototype existed to establish.
-
-**Depth does not yet pay for itself in accuracy.** `--depth-ablate` at matched *node count*:
-
-| | val acc | est. GE |
-|---|---|---|
-| deep: 256,160 | 85.98% | ~3,383 |
-| flat: 410 | **87.40%** | ~5,418 |
-
-The flat net is *more accurate* and the deep net is *cheaper* — mostly because a narrower last
-layer buys a smaller readout, and because fewer nodes read the encoder directly. Matched node
-count is the wrong control for a benchmark whose axis is area; this has to be rerun at **matched
-GE** before either "composition helps" or "composition does not help" can be claimed. As it stands,
-nothing here demonstrates that depth is doing the work, which is the central premise.
+Earlier gradient-based variants reached 86.92%, and were deleted in favour of this one; they are in
+git history if a comparison is ever wanted.
 
 ## Running it
 
 ```bash
-python records/sbuehrer/tao/proto.py --selfcheck      # multilinear forward == tree routing, bit for bit
-python records/sbuehrer/tao/proto.py --gradcheck      # signal == finite difference, and only on-path
-python records/sbuehrer/tao/proto.py --widths 1024,512,320 --bits 3   # discrete signal, the default
-python records/sbuehrer/tao/proto.py --signal-ablate  # discrete messages vs a real gradient
-python records/sbuehrer/tao/proto.py --ablate         # refit vs leaf-gradient vs both
-python records/sbuehrer/tao/proto.py --depth-ablate   # deep stack vs one flat layer
+python records/sbuehrer/tao/proto.py --selfcheck      # torch routing == numpy routing, bit for bit
+python records/sbuehrer/tao/proto.py --flipcheck      # votes are exact counterfactuals, on-path only
+python records/sbuehrer/tao/proto.py --widths 512,320 --bits 3
+python records/sbuehrer/tao/proto.py --stack-ablate   # taller vs wider at matched node count
 ```
 
-Knobs that decide what the optimizer is allowed to use: `--signal flip|grad` (discrete
-counterfactual votes, or a backward pass), `--do-grad` (also run Adam on the leaf latents), and
-`--no-revert` (drop the loss-gated layer revert, the one global check, making the update purely
-local).
-
-`--selfcheck` is the local stand-in for the harness's `predict()`-vs-netlist check: the torch
-multilinear forward and a pure-numpy tree router must agree bit for bit at every layer, every
-activation exactly in {0.0, 1.0}, and no path repeating a feature.
-
-`estimate_gates()` reports a **pre-ABC** area estimate. It prices each node alone and cannot see
-the sharing ABC finds between them, so it is an order of magnitude, not a leaderboard number — only
-`yosys` produces those. Its constants are calibrated against the two measured `backprop` points
-that share this encoder and readout (`xs` and `s`, both `bits=1`, whose encoder is free, which
-isolates the head).
-
-## Files
-
-| | |
-|---|---|
-| `tao.py` | `TreeLayer`, `TaoNet`, the vectorised refit, `fit()`, the numpy reference router, the area estimate |
-| `proto.py` | CLI: train, self-check, gradient-check, ablate |
+`--selfcheck` is the local stand-in for the harness's `predict()`-vs-netlist check. `estimate_gates()`
+is **pre-ABC**: it prices each node alone and cannot see the sharing ABC finds between them, so it
+is an order of magnitude, not a leaderboard number. Its constants are calibrated against the two
+measured `backprop` points sharing this encoder and readout.
 
 ## Phase 2, if the numbers justify it
 
-`submission.py` with `POINTS` / `build()`, emitting each node as a mux tree with constant-collapsed
-leaves. Note that `bench.load_record` imports `submission.py` by path, so a sibling `import tao`
-does not resolve — `submission.py` will have to put its own directory on `sys.path` first.
+`submission.py` with `POINTS`/`build()`, emitting each node as a mux tree with constant-collapsed
+leaves. `bench.load_record` imports `submission.py` by path, so a sibling `import tao` will not
+resolve — it must put its own directory on `sys.path` first.
 
-Named after Tree Alternating Optimization, the closest existing method: alternate between fitting a
-node's tree and the signal it is fit against.
+Named after Tree Alternating Optimization: alternate between fitting a node's tree and the signal
+it is fit against.
