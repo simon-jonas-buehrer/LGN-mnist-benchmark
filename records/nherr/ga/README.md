@@ -53,22 +53,21 @@ that and would make all seven thresholds real comparators across 784 pixels, for
 `m` is the headline configuration; it reads 91.7% on the record's own split and 91.37% here, under
 a different protocol. Do not quote the two interchangeably.
 
-## The rest of the code
+## The code
 
-`submission.py` is the harness entry point; the files beside it are the record as it was
-researched, kept so the numbers can be reproduced and extended.
+Three files, and nothing that is not on the path from MNIST to a measured circuit.
 
 | file | what it is |
 |---|---|
-| `ga_bits_wiring_mnist.py` | the net and the GA. Genome = truth tables + wiring; fixed / free / codebook wiring |
-| `evo_algos_mnist.py` | budget-matched algorithm comparison: `ga, aging, mapelites, nslc, eda, snes, gomea` |
-| `gate_importance_mnist.py` | three cross-validated importance measures (sensitivity, elite conservation, knockout) |
-| `dead_gate_autopsy.py` | why 65% of gates are dead, decomposed by cause per layer |
-| `prune_deploy_mnist.py` | static liveness -> provably bit-exact dead-gate pruning, 2x smaller artifact |
-| `backprop_bits_mnist.py` | the STE-backprop counterpart, same pipeline and metrics |
+| `lutnet.py` | the circuit: packed forward, codebook wiring, popcount readout |
+| `ga.py` | the search: `Config`, mutation, crossover, `train` |
+| `submission.py` | the harness contract: encode, train, `predict`, `emit_verilog` |
 
-Those scripts train on their own MNIST copy and report on their own axis; only `submission.py`
-uses the fixed split and the measured circuit.
+The upstream record also carried seven rival algorithms, three gate-importance measures, a
+dead-gate autopsy, a bit-exact pruner and an STE-backprop counterpart. None of them is on this
+path, so none of them is here; the findings above are what they established. Both files are carved
+verbatim out of those originals — the GA this ships trains bit-for-bit the same circuit the four
+measured points were built from.
 
 ```bash
 pip install -e '.[jax]'

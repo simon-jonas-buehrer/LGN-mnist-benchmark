@@ -35,8 +35,8 @@ from mnistbench.spec import Submission
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import jax.numpy as jnp  # noqa: E402
-from ga_bits_wiring_mnist import Net, pack  # noqa: E402
-from gate_importance_mnist import Config, train  # noqa: E402
+from ga import Config, train  # noqa: E402
+from lutnet import Net, pack  # noqa: E402
 
 TITLE = "genetic (learned truth tables + codebook wiring, pop 512 + crossover)"
 

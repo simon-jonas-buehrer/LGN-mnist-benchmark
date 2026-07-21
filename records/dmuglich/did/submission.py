@@ -40,8 +40,8 @@ from mnistbench.spec import Submission
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import jax.numpy as jnp  # noqa: E402
-from evo_algos_mnist import Config, Runner  # noqa: E402
-from ga_bits_wiring_mnist import Net, pack  # noqa: E402
+from did import Config, Runner  # noqa: E402
+from lutnet import Net, pack  # noqa: E402
 
 TITLE = "did (discrete influence descent, codebook rewiring, no population)"
 
@@ -63,7 +63,6 @@ class DidLutNet(Submission):
             raise ValueError(f"readout width {widths[-1]} must be divisible by {N_CLASSES}")
         self.thresholds = even_thresholds(bits)
         self.cfg = Config(
-            algo="did",
             widths=list(widths),
             thresholds=list(self.thresholds),
             gens=gens,
