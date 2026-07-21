@@ -134,7 +134,10 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bits", type=int, default=3, help="thermometer bits per pixel")
-    p.add_argument("--widths", default="512,320", help="nodes per layer; last %% 10 == 0")
+    p.add_argument("--widths", default="640,320,80",
+                   help="nodes per layer; last %% 10 == 0. A narrow last layer beats a wide one on "
+                        "BOTH axes -- the popcount head costs more than every tree combined, so "
+                        "trading head width for a third tree layer is free accuracy")
     p.add_argument("--depth", type=int, default=2, help="tree depth per node")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--steps", type=int, default=20, help="update steps per epoch")

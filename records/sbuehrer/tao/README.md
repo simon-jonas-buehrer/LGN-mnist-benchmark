@@ -62,9 +62,10 @@ than error rate. Counter width, separately, is **free**: 8-bit and unbounded wer
 
 ## Where it stands
 
-`--widths 512,320 --bits 3 --mtry 256 --rows 2048`, depth 2, one seed, CPU:
+`--widths 512,320 --bits 3 --mtry 0 --rows 2048`, depth 2, one seed, CPU:
 
-**70.33% val @ ~3,3xx estimated GE.** It learns, then plateaus near 70%.
+**72.17% val @ ~3,365 estimated GE**, and still climbing at epoch 30 -- that is a floor, not a
+converged number.
 
 What has and has not moved that ceiling, in order:
 
@@ -79,16 +80,34 @@ What has and has not moved that ceiling, in order:
 Only one thing has ever moved it, and it was **diversity between nodes**, not how a node
 searches. That is the thread worth pulling.
 
-Two related leads, both untested:
+Two failed attempts are worth recording, because they failed the *same way*. A margin hinge, and
+then a don't-care mask built from a readout counterfactual, both asked "could this one node, alone,
+change this sample's class?" and down-weighted the samples where the answer was no. Both lost
+accuracy. The premise is wrong: nodes fix samples **collectively**, so a sample losing by margin 3
+is unreachable for any single node and still perfectly fixable by three of them. Per-sample leverage
+of one node is a bad proxy for whether a sample is worth learning from.
 
-- **The readout target is degenerate.** Every node in a class group is asked for the identical
-  function -- fire iff `c == y`. Bagging makes them differ by noise rather than by role. Giving
-  each node in a group a different sub-target (an error-correcting code, as `_dichotomy_targets`
-  already does at init) would have them decompose the class instead of 32 nodes redundantly
-  approximating it.
-- **The area is in the wrong place.** The popcount head is ~1,874 GE against ~1,197 GE for every
-  tree combined -- more than half the silicon is the readout, which is also where the degenerate
-  target lives. A narrow final layer attacks both at once (`--stack-ablate`).
+### The area is in the wrong place, and a third layer fixes it
+
+The popcount head priced ~1,874 GE against ~1,197 GE for every tree combined -- more than half the
+silicon was the readout. Narrowing the last layer, 80 epochs each, `mtry 256`:
+
+| widths | val | GE | logic / encoder / head |
+|---|---|---|---|
+| 512,320 | 69.97% | 3,392 | 1,252 / 266 / 1,874 |
+| 512,320,160 | 70.93% | 2,552 | 1,442 / 148 / 962 |
+| **640,320,80** | **71.35%** | **2,318** | 1,590 / 222 / 506 |
+
+Strictly better on both axes: **+1.4 points for 32% less area.** The head shrinks 3.7x and the
+trees that replace it are cheaper per unit of accuracy than the popcount was. Worth re-running the
+whole sweep at `mtry 0`.
+
+One lead still untested: **the readout target is degenerate.** Every node in a class group is asked
+for the identical function -- fire iff `c == y`. Bagging makes them differ by noise rather than by
+role. Giving each node in a group a different sub-target (an error-correcting code, as
+`_dichotomy_targets` already does at init) would have them decompose the class instead of N nodes
+redundantly approximating it. A narrow final layer already helps here for the same reason: 8 nodes
+per class cannot afford to be redundant.
 
 On churn: batch size does cure it (`moved` falls 15-16% -> 5% -> 1% as rows go 512 -> 2048 ->
 8192, and the val oscillation disappears), so the "noisy at first, then stabilises" prediction
