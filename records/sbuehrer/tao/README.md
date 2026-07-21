@@ -62,17 +62,42 @@ than error rate. Counter width, separately, is **free**: 8-bit and unbounded wer
 
 ## Where it stands
 
-`--widths 512,320 --bits 3 --mtry 256`, depth 2, topk 1, 30 epochs, one seed, CPU:
+`--widths 512,320 --bits 3 --mtry 256 --rows 2048`, depth 2, one seed, CPU:
 
-**64.70% val @ ~3,446 estimated GE.** It learns, then plateaus around 63–65%.
+**70.33% val @ ~3,3xx estimated GE.** It learns, then plateaus near 70%.
 
-Two things that plateau points at, both concrete:
+What has and has not moved that ceiling, in order:
 
-- **Only 12–15% of nodes move per step.** Most nodes propose a change and reject it, so the search
-  is finding few improvements — the update rule, not the step size, is the limiter.
-- **The readout now dominates the area.** At depth 2 the trees cost ~1,276 GE and the popcount head
-  costs ~1,874. Widening the last layer is the most expensive thing you can do; a taller stack with
-  a *narrow* final layer is the cheap direction. `--stack-ablate` tests exactly that.
+| change | result |
+|---|---|
+| per-node row bagging restored | 63.00% -> **70.33%** |
+| batch 512 -> 2048 -> 8192 | 64.70 / 63.00 / 64.00 -- no change |
+| slot picker: greedy / cycle / random | 70.33 / 69.97 / 69.35 -- no change |
+| 30 -> 300 epochs (before bagging) | none; best stayed at epoch 21 |
+
+Only one thing has ever moved it, and it was **diversity between nodes**, not how a node
+searches. That is the thread worth pulling.
+
+Two related leads, both untested:
+
+- **The readout target is degenerate.** Every node in a class group is asked for the identical
+  function -- fire iff `c == y`. Bagging makes them differ by noise rather than by role. Giving
+  each node in a group a different sub-target (an error-correcting code, as `_dichotomy_targets`
+  already does at init) would have them decompose the class instead of 32 nodes redundantly
+  approximating it.
+- **The area is in the wrong place.** The popcount head is ~1,874 GE against ~1,197 GE for every
+  tree combined -- more than half the silicon is the readout, which is also where the degenerate
+  target lives. A narrow final layer attacks both at once (`--stack-ablate`).
+
+On churn: batch size does cure it (`moved` falls 15-16% -> 5% -> 1% as rows go 512 -> 2048 ->
+8192, and the val oscillation disappears), so the "noisy at first, then stabilises" prediction
+holds. It just does not buy accuracy -- the ceiling is the same whether the net thrashes or sits
+still. Worth keeping separate: a mechanism you can demonstrate is not automatically the mechanism
+that matters.
+
+The slot picker is chosen on hardware cost rather than accuracy, since all three tie: `cycle`
+needs one scoring pass and a counter, greedy needs `2^D - 1` scoring passes plus a compare tree,
+and `random` needs an LFSR.
 
 Tree depth is fixed at 2 from here: at matched node count accuracy went 81.05 → 86.12 → 88.40 for
 depth 2 → 3 → 4, so +5.1 then +2.3 points, against a steady ~1.9× area each step. Capacity comes
