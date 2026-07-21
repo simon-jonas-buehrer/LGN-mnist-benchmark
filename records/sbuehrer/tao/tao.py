@@ -147,8 +147,8 @@ def _score(cnt0: torch.Tensor, cnt1: torch.Tensor) -> torch.Tensor:
     return (cnt0[..., 0, :] * cnt1[..., 1, :] - cnt0[..., 1, :] * cnt1[..., 0, :]).abs()
 
 
-def leaves_and_err(layer: TreeLayer, X: torch.Tensor, feat: torch.Tensor,
-                   tgt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def leaves_and_err(layer: TreeLayer, X: torch.Tensor, feat: torch.Tensor, tgt: torch.Tensor,
+                   bag: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Best leaves for a given wiring, and the disagreement they leave, per node.
 
     Rules follow wiring: for any structure the best leaf is the majority target in that cell, so a
@@ -158,15 +158,17 @@ def leaves_and_err(layer: TreeLayer, X: torch.Tensor, feat: torch.Tensor,
     cell = layer.cells(X, feat, layer.depth)
     pos = torch.zeros(M, layer.n_leaf, device=X.device, dtype=X.dtype)
     neg = torch.zeros_like(pos)
-    pos.scatter_add_(1, cell.t(), tgt.t().contiguous())
-    neg.scatter_add_(1, cell.t(), (1 - tgt).t().contiguous())
+    m = torch.ones_like(tgt) if bag is None else bag
+    pos.scatter_add_(1, cell.t(), (tgt * m).t().contiguous())
+    neg.scatter_add_(1, cell.t(), ((1 - tgt) * m).t().contiguous())
     leaf = (pos > neg).to(X.dtype)
     out = leaf.reshape(-1)[torch.arange(M, device=X.device) * layer.n_leaf + cell]
-    return leaf, (out != tgt).to(X.dtype).sum(0)
+    return leaf, ((out != tgt).to(X.dtype) * m).sum(0)
 
 
 def best_wiring(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, feat: torch.Tensor, *,
-                mtry: int, chunk: int, gen: torch.Generator | None) -> torch.Tensor:
+                mtry: int, chunk: int, gen: torch.Generator | None,
+                bag: torch.Tensor | None = None) -> torch.Tensor:
     """For every slot, the candidate input bit that best separates the target there.
 
     Level by level, all nodes and all cells at once. At level d the batch is partitioned into 2^d
@@ -197,7 +199,8 @@ def best_wiring(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, feat: torc
 
             col = torch.arange(Mc, device=dev) * (K * 2) + col_base[:, m0:m1]
             G = torch.zeros(B, Mc * K * 2, device=dev, dtype=X.dtype)
-            G.scatter_(1, col, torch.ones_like(col, dtype=X.dtype))
+            G.scatter_(1, col, (torch.ones_like(col, dtype=X.dtype) if bag is None
+                                else bag[:, m0:m1].contiguous()))
 
             cnt1 = (G.t() @ Xc).reshape(Mc, K, 2, -1)
             cnt0 = G.sum(0).reshape(Mc, K, 2, 1) - cnt1
@@ -221,7 +224,8 @@ def best_wiring(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, feat: torc
 
 
 def update_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, *, topk: int = 1,
-                 mtry: int = 0, chunk: int = 256, gen: torch.Generator | None = None) -> float:
+                 mtry: int = 0, chunk: int = 256, bag: float = 0.5,
+                 gen: torch.Generator | None = None) -> float:
     """Change `topk` of each node's 2^D - 1 decisions, toward its target. Returns move rate.
 
     A node has few enough slots that every single-decision change can be scored EXACTLY -- rewire
@@ -234,23 +238,29 @@ def update_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, *, topk: 
     """
     if mtry and mtry <= layer.depth:
         raise ValueError(f"mtry={mtry} must exceed depth {layer.depth}")
+    # Every node in one readout group is handed the SAME target -- fire iff my class is the
+    # answer -- so without per-node variation they would all build the same tree and the readout
+    # width would be wasted. Each node therefore sees its own random subset of the batch's rows:
+    # one bit per (row, node), an LFSR in hardware, and it keeps everything binary.
+    msk = None if bag <= 0 else (torch.rand(tgt.shape, generator=gen, device=X.device)
+                                 < bag).to(X.dtype)
     old = layer.feat
-    cand = best_wiring(layer, X, tgt, old, mtry=mtry, chunk=chunk, gen=gen)
-    _, err_old = leaves_and_err(layer, X, old, tgt)
+    cand = best_wiring(layer, X, tgt, old, mtry=mtry, chunk=chunk, gen=gen, bag=msk)
+    _, err_old = leaves_and_err(layer, X, old, tgt, msk)
 
     if topk and topk < layer.n_slots:
         gain = torch.empty(layer.width, layer.n_slots, device=X.device, dtype=X.dtype)
         for s in range(layer.n_slots):
             trial = old.clone()
             trial[:, s] = cand[:, s]
-            _, e = leaves_and_err(layer, X, trial, tgt)
+            _, e = leaves_and_err(layer, X, trial, tgt, msk)
             gain[:, s] = err_old - e
         take = gain.topk(topk, dim=1).indices
         merged = old.clone()
         merged.scatter_(1, take, cand.gather(1, take))
         cand = merged
 
-    leaf, err_new = leaves_and_err(layer, X, cand, tgt)
+    leaf, err_new = leaves_and_err(layer, X, cand, tgt, msk)
     keep = err_new < err_old
     layer.feat[keep] = cand[keep]
     layer.leaf[keep] = leaf[keep]
@@ -400,7 +410,7 @@ def _dichotomy_targets(y: torch.Tensor, width: int, g: torch.Generator) -> torch
 @torch.no_grad()
 def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs: int = 60,
         steps: int = 20, rows: int = 512, topk: int = 1, mtry: int = 1024, chunk: int = 256,
-        patience: int = 20, log_every: int = 1) -> float:
+        bag: float = 0.5, patience: int = 20, log_every: int = 1) -> float:
     """Train. Returns the best val accuracy, leaving `net` holding that state.
 
     Each step: route a batch, carry one error bit per node back down, let every node change `topk`
@@ -441,7 +451,7 @@ def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs:
             rx, ry = x[idx], y[idx]
             for li, X, tgt in targets(net, rx, ry):
                 moved.append(update_layer(net.layers[li], X, tgt, topk=topk, mtry=mtry,
-                                          chunk=chunk, gen=gen))
+                                          chunk=chunk, bag=bag, gen=gen))
 
         acc = val_acc()
         if acc > best:
