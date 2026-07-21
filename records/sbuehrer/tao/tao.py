@@ -224,8 +224,8 @@ def best_wiring(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, feat: torc
 
 
 def update_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, *, topk: int = 1,
-                 mtry: int = 0, chunk: int = 256, bag: float = 0.5,
-                 gen: torch.Generator | None = None) -> float:
+                 mtry: int = 0, chunk: int = 256, bag: float = 0.5, pick: str = "cycle",
+                 step: int = 0, gen: torch.Generator | None = None) -> float:
     """Change `topk` of each node's 2^D - 1 decisions, toward its target. Returns move rate.
 
     A node has few enough slots that every single-decision change can be scored EXACTLY -- rewire
@@ -248,7 +248,22 @@ def update_layer(layer: TreeLayer, X: torch.Tensor, tgt: torch.Tensor, *, topk: 
     cand = best_wiring(layer, X, tgt, old, mtry=mtry, chunk=chunk, gen=gen, bag=msk)
     _, err_old = leaves_and_err(layer, X, old, tgt, msk)
 
-    if topk and topk < layer.n_slots:
+    if pick in ("cycle", "random"):
+        # One decision per node, chosen at RANDOM, replaced by the best input+rule for that slot.
+        # Picking the most valuable slot instead sounds better and is not: the root has the most
+        # leverage over the output, so a greedy choice keeps landing there and the deeper
+        # decisions are never revisited. Choosing uniformly guarantees every slot gets attention,
+        # and makes two nodes with the same target diverge instead of both taking the same fix.
+        # "cycle" needs no randomness at all: slot (node index + step) mod 2^D - 1, with the
+        # step counter ticking once per update. A counter and a modulo, no LFSR, and coverage is
+        # exactly equal rather than equal in expectation. Staggering by node index also stops a
+        # whole layer working on the same slot at the same time.
+        if pick == "cycle":
+            s = ((torch.arange(layer.width, device=X.device) + step) % layer.n_slots)[:, None]
+        else:
+            s = torch.randint(layer.n_slots, (layer.width, 1), generator=gen, device=X.device)
+        cand = old.clone().scatter_(1, s, cand.gather(1, s))
+    elif topk and topk < layer.n_slots:
         gain = torch.empty(layer.width, layer.n_slots, device=X.device, dtype=X.dtype)
         for s in range(layer.n_slots):
             trial = old.clone()
@@ -410,7 +425,8 @@ def _dichotomy_targets(y: torch.Tensor, width: int, g: torch.Generator) -> torch
 @torch.no_grad()
 def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs: int = 60,
         steps: int = 20, rows: int = 512, topk: int = 1, mtry: int = 1024, chunk: int = 256,
-        bag: float = 0.5, patience: int = 20, log_every: int = 1) -> float:
+        bag: float = 0.5, pick: str = "cycle", patience: int = 20,
+        log_every: int = 1) -> float:
     """Train. Returns the best val accuracy, leaving `net` holding that state.
 
     Each step: route a batch, carry one error bit per node back down, let every node change `topk`
@@ -444,14 +460,17 @@ def fit(net: TaoNet, data: Mnist, *, device: str = "cpu", seed: int = 0, epochs:
     print(f"[init] val {best:.2f}%", flush=True)
 
     t0 = time.time()
+    tick = 0
     for ep in range(epochs):
         moved = []
         for _ in range(steps):
+            tick += 1
             idx = torch.randperm(x.shape[0], generator=gen, device=device)[:rows]
             rx, ry = x[idx], y[idx]
             for li, X, tgt in targets(net, rx, ry):
                 moved.append(update_layer(net.layers[li], X, tgt, topk=topk, mtry=mtry,
-                                          chunk=chunk, bag=bag, gen=gen))
+                                          chunk=chunk, bag=bag, pick=pick, step=tick,
+                                          gen=gen))
 
         acc = val_acc()
         if acc > best:

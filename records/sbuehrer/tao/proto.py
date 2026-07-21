@@ -114,7 +114,8 @@ def _train(a: argparse.Namespace, device: str, data, *, widths: str | None = Non
     print(f"\n{'=' * 78}\n{tag}\n{'=' * 78}", flush=True)
     net = make(a, device, widths)
     acc = fit(net, data, device=device, seed=a.seed, epochs=a.epochs, steps=a.steps, rows=a.rows,
-              topk=a.topk, mtry=a.mtry, chunk=a.chunk, patience=a.patience, log_every=a.log_every)
+              topk=a.topk, mtry=a.mtry, chunk=a.chunk, pick=a.pick, patience=a.patience,
+              log_every=a.log_every)
     return acc, report(net, acc, tag)
 
 
@@ -140,6 +141,10 @@ def main() -> None:
     p.add_argument("--rows", type=int, default=512, help="batch size for one update step")
     p.add_argument("--topk", type=int, default=1,
                    help="decisions a node may change per step, of its 2^depth-1. The step size")
+    p.add_argument("--pick", default="cycle", choices=("cycle", "random", "best"),
+                   help="which decision a node changes per step: round-robin by (node + step) "
+                        "mod slots, a random slot, or the slot whose change helps most (greedy, "
+                        "and biased toward the root)")
     p.add_argument("--mtry", type=int, default=1024, help="candidate bits per node-chunk, 0=all")
     p.add_argument("--chunk", type=int, default=256, help="nodes per counting pass")
     p.add_argument("--patience", type=int, default=20)
@@ -166,7 +171,8 @@ def main() -> None:
     data = load()
     net = make(a, dev)
     acc = fit(net, data, device=dev, seed=a.seed, epochs=a.epochs, steps=a.steps, rows=a.rows,
-              topk=a.topk, mtry=a.mtry, chunk=a.chunk, patience=a.patience, log_every=a.log_every)
+              topk=a.topk, mtry=a.mtry, chunk=a.chunk, pick=a.pick, patience=a.patience,
+              log_every=a.log_every)
     report(net, acc)
     ct = net.predict(torch.from_numpy(np.ascontiguousarray(data.val_x[:512])).to(dev)).cpu().numpy()
     bad = int((ct != predict_numpy(net, data.val_x[:512])).sum())
